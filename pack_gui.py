@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pack_gui.py — Docker 打包工具可视化界面（v1.2）
-新增：一键 Compose、镜像推送、历史记录、构建加速
+pack_gui.py — Docker 打包工具可视化界面（v1.3）
+新增：23 种框架类型、一键 Compose、镜像推送、历史记录、构建加速
 """
 
 import json
@@ -33,7 +33,7 @@ HISTORY_FILE = HISTORY_DIR / "history.json"
 class PackApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("Docker 项目打包工具 v1.2")
+        root.title("Docker 项目打包工具 v1.3")
         root.geometry("880x780")
         root.minsize(800, 680)
 
@@ -57,8 +57,7 @@ class PackApp:
     def _print_banner(self):
         """启动时输出绿色作者信息"""
         self.log_text.configure(state="normal")
-        self.log_text.insert(tk.END, "作者: y50008    ", ("green",))
-        self.log_text.insert(tk.END, "来源: www.52pojie.com\n", ("green",))
+        self.log_text.insert(tk.END, "作者: y50008\n", ("green",))
         self.log_text.insert(tk.END, "开源地址: https://github.com/y50008/docker-pack\n", ("green",))
         self.log_text.insert(tk.END, "-" * 60 + "\n")
         self.log_text.see(tk.END)

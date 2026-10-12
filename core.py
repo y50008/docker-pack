@@ -37,6 +37,12 @@ class ProjectType:
     DJANGO = "django"
     FASTAPI = "fastapi"
     SPRING_BOOT = "spring-boot"
+    VITE = "vite-spa"
+    DENO = "deno"
+    ELIXIR = "elixir"
+    HASKELL = "haskell"
+    JULIA = "julia"
+    SWIFT = "swift"
     UNKNOWN = "unknown"
 
 
@@ -302,6 +308,86 @@ USER spring
 EXPOSE {port}
 ENTRYPOINT ["java", "-jar", "app.jar"]
 """,
+    ProjectType.VITE: """\
+# Vite / Vue3 / React SPA 前端专项（node 构建 → nginx 托管，固定监听 80）
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN --mount=type=cache,target=/root/.npm \\
+ npm config set registry https://registry.npmmirror.com \\
+ && (npm ci || npm install)
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine AS runner
+COPY --from=builder /app/dist /usr/share/nginx/html
+EXPOSE 80
+""",
+    ProjectType.DENO: """\
+# Deno 专项（入口自动识别 main.ts / mod.ts / server.ts / index.ts）
+FROM denoland/deno:alpine-2.0
+WORKDIR /app
+COPY . .
+RUN deno cache main.ts 2>/dev/null || true
+EXPOSE {port}
+CMD ["run", "--allow-all", "main.ts"]
+""",
+    ProjectType.ELIXIR: """\
+# Elixir / Phoenix 专项（mix run 常驻启动）
+FROM elixir:1.16-alpine AS builder
+WORKDIR /app
+RUN mix local.hex --force && mix local.rebar --force
+COPY mix.exs mix.lock ./
+RUN mix deps.get --only prod
+COPY . .
+RUN MIX_ENV=prod mix compile
+
+FROM elixir:1.16-alpine AS runner
+WORKDIR /app
+COPY --from=builder /app .
+EXPOSE {port}
+CMD ["mix", "run", "--no-halt"]
+""",
+    ProjectType.HASKELL: """\
+# Haskell 专项（stack 构建，可执行名如不同请修改最后一行）
+FROM haskell:9.6 AS builder
+WORKDIR /app
+COPY stack.yaml package.yaml *.cabal ./
+RUN stack build --only-dependencies
+COPY . .
+RUN stack build --copy-bins --local-bin-path /out
+
+FROM debian:bookworm-slim AS runner
+WORKDIR /app
+COPY --from=builder /out/* /usr/local/bin/
+EXPOSE {port}
+CMD ["app"]
+""",
+    ProjectType.JULIA: """\
+# Julia 专项（入口默认 src/main.jl，如不同请修改最后一行）
+FROM julia:1.10
+WORKDIR /app
+COPY Project.toml Manifest.toml ./
+RUN julia --project=. -e 'using Pkg; Pkg.instantiate()'
+COPY . .
+EXPOSE {port}
+CMD ["julia", "--project=.", "src/main.jl"]
+""",
+    ProjectType.SWIFT: """\
+# Swift 专项（可执行名默认 App，如不同请修改最后一行）
+FROM swift:5.10 AS builder
+WORKDIR /app
+COPY Package.swift ./
+RUN swift package resolve
+COPY . .
+RUN swift build -c release
+
+FROM swift:5.10-slim AS runner
+WORKDIR /app
+COPY --from=builder /app/.build/release/App .
+EXPOSE {port}
+CMD ["./App"]
+""",
 }
 
 DOCKERIGNORE = """\
@@ -359,6 +445,32 @@ def detect_project_type(root: Path) -> str:
     # Django（必须在普通 Python 之前判断）
     if (root / "manage.py").exists():
         return ProjectType.DJANGO
+
+    # Vite / Vue / Svelte 前端（必须在 package.json 之前判断）
+    if (list(root.glob("vite.config.*")) or (root / "vue.config.js").exists()
+            or (root / "svelte.config.js").exists()):
+        return ProjectType.VITE
+
+    # Deno（有 deno.json 才算，避免与纯 Node TS 项目混淆）
+    if (root / "deno.json").exists() or (root / "deno.jsonc").exists():
+        return ProjectType.DENO
+
+    # Elixir / Phoenix
+    if (root / "mix.exs").exists():
+        return ProjectType.ELIXIR
+
+    # Haskell（stack / cabal）
+    if ((root / "stack.yaml").exists() or (root / "package.yaml").exists()
+            or list(root.glob("*.cabal"))):
+        return ProjectType.HASKELL
+
+    # Julia
+    if (root / "Project.toml").exists():
+        return ProjectType.JULIA
+
+    # Swift
+    if (root / "Package.swift").exists():
+        return ProjectType.SWIFT
 
     # Spring Boot（读取 pom.xml 内容判断，在普通 Maven 之前）
     if (root / "pom.xml").exists():
@@ -418,6 +530,10 @@ def detect_start_file(root: Path, ptype: str):
         for f in ["app.rb", "main.rb", "server.rb", "config.ru"]:
             if (root / f).exists():
                 return f, False
+    if ptype == ProjectType.DENO:
+        for f in ["main.ts", "mod.ts", "server.ts", "index.ts"]:
+            if (root / f).exists():
+                return f, False
     return None, False
 
 
@@ -464,6 +580,8 @@ def prepare_dockerfile(root: Path, ptype: str, port: int, log: Optional[Callable
             content = content.replace('["python", "app.py"]', f'["python", "{start_file}"]')
         elif ptype == ProjectType.RUBY:
             content = content.replace('["ruby", "app.rb"]', f'["ruby", "{start_file}"]')
+        elif ptype == ProjectType.DENO:
+            content = content.replace('"main.ts"', f'"{start_file}"')
 
     (root / "Dockerfile").write_text(content, encoding="utf-8", newline="\n")
     (root / ".dockerignore").write_text(DOCKERIGNORE, encoding="utf-8", newline="\n")

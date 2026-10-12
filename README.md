@@ -2,14 +2,14 @@
 
 # 🐳 Docker Pack GUI
 
-**一键将项目源码打包成 Docker 镜像的可视化工具**
+**一键将项目源码打包成 Docker 镜像的可视化工具 — 双击即用，无需安装任何依赖环境**
 
-作者：y50008 ｜ 来源：www.52pojie.com ｜ 开源地址：https://github.com/y50008/docker-pack
+作者：y50008 ｜ 开源地址：https://github.com/y50008/docker-pack
 
-![Version](https://img.shields.io/badge/version-1.2.0-blue)
+![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-green)
-![Python](https://img.shields.io/badge/python-3.10%2B-yellow)
 ![Docker](https://img.shields.io/badge/docker-required-2496ED)
+![Framework](https://img.shields.io/badge/支持框架-23种-orange)
 
 </div>
 
@@ -17,139 +17,86 @@
 
 ## 📖 项目简介
 
-Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。你只需要选择项目源码目录（或输入 Git 仓库地址），点击「开始打包」，工具会自动识别项目语言、生成多阶段 Dockerfile、调用 Docker 构建镜像，并最终导出为 `.tar` 文件供你下载保存。
+Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。**下载 exe 后双击即可打开，不需要安装 Python、不需要配置任何环境**（工具已把所有运行文件打包进 exe）。
 
-**无需手写 Dockerfile，无需记 docker build 命令，小白也能打出生产级镜像。**
+你只需要选择项目源码目录（或输入 Git 仓库地址），点击「开始打包」，工具会自动：
 
-> 🆕 **v1.2 新增**：一键生成 docker-compose.yml、构建后推送镜像到仓库、打包历史记录（一键重新打包）、BuildKit 依赖缓存加速。
->
-> 🆕 **v1.1 新增**：专项框架模板（Next.js / Django / FastAPI / Spring Boot）、构建后容器自检、**Web 部署版**（浏览器访问，多人共用）。
+1. **识别项目语言/框架**（支持 23 种，见下文）
+2. **自动生成多阶段 Dockerfile**（国内镜像源加速，依赖缓存复用）
+3. **调用 Docker 构建镜像**（单架构 / 多架构可选）
+4. **导出为 `.tar` 文件**供你下载保存
+5. **可选**：构建后自检、一键生成 docker-compose.yml、推送到镜像仓库
+
+> 无需手写 Dockerfile，无需记 docker build 命令，小白也能打出生产级镜像。
 
 ![工具界面示意图](docs/screenshot.png)
 
 ---
 
-## ✨ 核心特性
+## 🚀 快速开始（3 步上手）
 
-| 特性 | 说明 |
+### 第 1 步：下载并双击运行
+
+- 下载 [Releases](../../releases) 页面中的 `DockerPack.exe`
+- **双击运行，无需安装**——exe 已内置完整运行环境（Python + tkinter 界面库全部打包在文件里）
+- 杀毒软件若提示，选择信任即可（PyInstaller 打包的程序首次运行常见此提示）
+
+### 第 2 步：选择源码
+
+| 方式 | 操作 |
 |---|---|
-| 🎯 **自动识别项目类型** | 支持 17 种语言/框架（含 4 个专项框架模板），无需手动配置 |
-| 🎨 **可视化界面** | 原生 Windows GUI，双击 exe 即用，无需安装 Python |
-| 🌐 **支持 Git 仓库** | 直接输入 GitHub/Gitee 地址，自动 clone 后打包 |
-| 🏗️ **多架构构建** | 支持 amd64 / arm64 / armv7 / riscv64 任意组合 |
-| ⏱️ **实时进度** | 进度条 + 已用时 + 预计剩余时间 + 实时日志 |
-| 📦 **一键导出 tar** | 构建完成后点下载，选择保存位置即可 |
-| 🩺 **构建后自检** | 打包完自动运行容器 + 探测端口，验证镜像真能跑 |
-| 🧩 **一键 Compose** | 打包完顺手生成 docker-compose.yml（可选附带 MySQL/Redis） |
-| 🚀 **镜像推送** | 支持推送到 Docker Hub / 阿里云 ACR / 腾讯云 CCR |
-| 🕘 **历史记录** | 自动记录每次打包，一键回填配置重新打包 |
-| ⚡ **构建加速** | BuildKit 依赖缓存挂载，二次构建依赖层秒级复用 |
-| 🌍 **Web 部署版** | 工具本身可 Docker 化部署，浏览器操作、多人共用 |
-| 🇨🇳 **国内镜像源** | npm / pip / Go proxy 默认切国内源，构建更快 |
-| 📦 **多阶段构建** | 自动生成精简镜像，体积最小化 |
+| 📁 本地目录 | 点「浏览...」选择项目文件夹，工具会自动把目录名填成镜像名 |
+| 🌐 项目地址 | 粘贴 GitHub / Gitee / 自建 Git 仓库的 HTTPS 或 SSH 地址 |
+
+### 第 3 步：开始打包
+
+1. 填镜像名、标签（tag）、暴露端口
+2. 勾选目标架构（默认 amd64；需要 ARM 服务器就勾 arm64）
+3. （可选）勾选部署选项：生成 docker-compose.yml / 构建后推送
+4. 点「开始打包」→ 看实时日志与进度条
+5. 完成后点「下载打包好的镜像文件」，选择保存位置即可
 
 ---
 
-## 🚀 快速开始
+## ⚙️ 环境要求
 
-### 环境要求
+| 项目 | 要求 | 说明 |
+|---|---|---|
+| 操作系统 | Windows 10 / 11 | 工具本身无需安装任何 Python 环境 |
+| Docker | 已安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/) | 打包动作由 Docker 执行，这是唯一依赖 |
+| Git（可选） | 已安装 [Git](https://git-scm.com/) | 仅在输入 Git 仓库地址时需要 |
+| 网络 | 能访问 Docker Hub / 国内镜像源 | 首次构建需拉取基础镜像 |
 
-- Windows 10 / 11
-- 已安装并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-- 如需打包 Git 仓库，本机需安装 [Git](https://git-scm.com/)
-
-### 使用步骤
-
-1. **下载 `DockerPack.exe`**（在 [Releases](../../releases) 页面）
-2. **双击运行**，无需安装
-3. **选择源码来源**：
-   - 📁 本地目录：点「浏览...」选择项目文件夹
-   - 🌐 项目地址：输入 GitHub/Gitee 仓库 URL
-4. **配置镜像**：镜像名、标签（tag）、暴露端口
-5. **选择目标架构**：默认 amd64，需要 ARM 服务器就勾选 arm64
-6. **（可选）部署选项**：勾选「生成 docker-compose.yml」可一并产出部署编排文件；勾选「构建后推送镜像」并填仓库地址，打包完自动推送
-7. **点击「开始打包」**，观察实时日志和进度
-8. **打包完成后点「下载打包好的镜像文件」**，选择保存位置；「历史记录」页可一键重新打包
+> ✅ **exe 双击即用**：Python、tkinter、Tcl/Tk 已全部打包进单个 exe（11MB），目标机器上无需安装任何开发环境。
 
 ---
 
-## 🧩 部署选项（v1.2 新增）
+## 🗂️ 支持的项目类型（23 种）
 
-### 一键生成 docker-compose.yml
-
-勾选「生成 docker-compose.yml」后，打包完成会自动生成编排文件，可选附带 **MySQL 8** 和 **Redis 7** 服务：
-
-```yaml
-version: "3.8"
-services:
-  app:
-    image: my-app:latest
-    container_name: my-app
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      - TZ=Asia/Shanghai
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: change-me
-      MYSQL_DATABASE: app
-    volumes:
-      - mysql-data:/var/lib/mysql
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis-data:/data
-volumes:
-  mysql-data:
-  redis-data:
-```
-
-部署时只需一条命令：`docker compose up -d`。
-
-### 镜像推送
-
-勾选「构建后推送镜像」并填写仓库地址（如 `registry.cn-hangzhou.aliyuncs.com/你的命名空间`），构建完成后自动执行 `docker push`：
-
-| 目标 | 仓库地址示例 |
-|---|---|
-| Docker Hub | `你的用户名`（推送到 `你的用户名/镜像名:标签`） |
-| 阿里云 ACR | `registry.cn-hangzhou.aliyuncs.com/命名空间` |
-| 腾讯云 CCR | `ccr.ccs.tencentcloud.com/命名空间` |
-
-> 💡 推送前请先在本机执行 `docker login` 登录对应仓库；推送仅支持单架构构建（多架构 OCI 产物不进入本地仓库，无法 push）。
-
-### 历史记录
-
-每次打包自动记录（时间、镜像、端口、架构、来源、状态），存在 `%APPDATA%\DockerPack\history.json`。在「历史记录」页选中一条，点「用选中记录重新打包」即可回填全部配置并重新构建。
-
-### 构建加速
-
-Node / Python / Maven / Gradle / Go 模板已内置 **BuildKit 依赖缓存挂载**（`--mount=type=cache`），依赖层缓存可跨构建复用，二次打包速度大幅提升。需 Docker 20.10+（Docker Desktop 默认支持）。
-
----
-
-## 🗂️ 支持的项目类型
-
-### 专项框架模板（v1.1 新增）
+### 专项框架模板（自动识别 + 专属优化）
 
 | 标志文件 | 识别为 | 专项优化 |
 |---|---|---|
-| `next.config.*` | **Next.js** | SSR 模式：`.next` 产物 + `npm start`，非静态导出 |
-| `manage.py` | **Django** | 自动 migrate + collectstatic + gunicorn 4 worker，自动解析 wsgi 模块 |
-| `requirements.txt` 含 fastapi/uvicorn + `main.py` | **FastAPI** | uvicorn 4 worker 启动 |
-| `pom.xml` 含 spring-boot | **Spring Boot** | 非 root 用户运行 + JRE 21，更安全 |
+| `next.config.*` | **Next.js** | SSR 模式：`.next` 产物 + `npm start` |
+| `manage.py` | **Django** | 自动 migrate + collectstatic + gunicorn，自动解析 wsgi 模块 |
+| `requirements.txt` 含 fastapi + `main.py` | **FastAPI** | uvicorn 多 worker 启动 |
+| `pom.xml` 含 spring-boot | **Spring Boot** | 非 root 用户运行 + JRE 21 |
+| `vite.config.*` / `vue.config.js` / `svelte.config.js` | **Vite 前端 SPA** | node 构建 → nginx 托管（固定监听 80） |
+| `deno.json` / `deno.jsonc` | **Deno** | 自动识别入口 main.ts / mod.ts / server.ts |
+| `mix.exs` | **Elixir / Phoenix** | mix 编译 + 常驻运行 |
+| `stack.yaml` / `package.yaml` / `*.cabal` | **Haskell** | stack 构建 + 精简 debian 运行 |
+| `Project.toml` | **Julia** | Pkg 实例化 + 运行 |
+| `Package.swift` | **Swift** | swift build release |
 
-### 通用类型
+### 通用类型（按标志文件识别）
 
 | 标志文件 | 识别为 | 基础镜像策略 |
 |---|---|---|
-| `Dockerfile`（已有） | 项目自带 Dockerfile | **直接复用，不覆盖** |
+| `Dockerfile`（已有） | 项目自带 | **直接复用，不覆盖** |
 | `package.json` | Node.js（含 TS/React/Vue） | node:20-alpine 多阶段 |
 | `requirements.txt` / `pyproject.toml` | Python | python:3.11-slim 多阶段 |
 | `pom.xml` | Java Maven | maven:3.9 + JRE 21 |
-| `build.gradle` | Java Gradle / Spring Boot | gradle:8 + JRE 21 |
+| `build.gradle(.kts)` | Java Gradle / Spring Boot | gradle:8 + JRE 21 |
 | `go.mod` | Go | golang:1.22 + alpine |
 | `*.csproj` / `*.sln` | .NET | dotnet/sdk:8 + aspnet:8 |
 | `composer.json` | PHP | composer:2 + php:8.3-apache |
@@ -159,44 +106,9 @@ Node / Python / Maven / Gradle / Go 模板已内置 **BuildKit 依赖缓存挂�
 | `pubspec.yaml` | Flutter Web | Flutter SDK + nginx |
 | `index.html`（兜底） | 静态网站 | nginx:alpine |
 
-> 💡 **智能兼容**：如果项目根目录已经有 Dockerfile，工具会直接使用它，不会覆盖你写好的配置。
-
----
-
-## 🩺 构建后自检（v1.1 新增）
-
-单架构构建完成后，工具会自动：
-
-1. `docker run` 启动刚构建的镜像
-2. 轮询 30 秒，检查容器是否存活
-3. 探测映射端口是否可访问
-4. 自动清理测试容器（不留垃圾）
-
-结果在日志中显示为 `✓ 自检通过` / `△ 容器存活但端口暂不可达` / `✗ 容器提前退出（附最近日志）`。**自检失败不影响 tar 导出**，只提醒你镜像可能有问题。
-
----
-
-## 🌍 Web 部署版（v1.1 新增）
-
-工具本身可以 Docker 化部署，浏览器访问、多人共用：
-
-```bash
-cd docker-pack-gui/web
-docker build -t docker-pack-web .
-docker run -d -p 8000:8000 \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /data/docker-pack-web:/data \
-    docker-pack-web
-```
-
-然后浏览器访问 `http://服务器IP:8000`，功能和 exe 版一致（选目录/输仓库地址、选架构、实时日志、下载 tar）。
-
-**本地开发运行 Web 版**（需 Python 3.10+）：
-
-```bash
-pip install flask
-python web_app.py          # 默认端口 8000
-```
+> 💡 **智能兼容**：如果项目根目录已有 Dockerfile，工具直接使用它，不覆盖你写好的配置。
+>
+> 🔧 少数小众模板（Haskell/Swift 等）的入口文件名若与项目不同，生成的 Dockerfile 末尾有注释提示，按注释修改即可。
 
 ---
 
@@ -214,9 +126,65 @@ python web_app.py          # 默认端口 8000
 
 ---
 
+## 🧩 部署选项
+
+### 一键生成 docker-compose.yml
+
+勾选「生成 docker-compose.yml」，打包完成自动产出编排文件，可选附带 **MySQL 8** / **Redis 7**：
+
+```yaml
+version: "3.8"
+services:
+  app:
+    image: my-app:latest
+    container_name: my-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: change-me
+  redis:
+    image: redis:7-alpine
+volumes:
+  mysql-data:
+  redis-data:
+```
+
+部署时只需一条命令：`docker compose up -d`。
+
+### 镜像推送
+
+勾选「构建后推送镜像」+ 填写仓库地址，打包完自动 `docker push`：
+
+| 目标 | 仓库地址示例 |
+|---|---|
+| Docker Hub | `你的用户名` |
+| 阿里云 ACR | `registry.cn-hangzhou.aliyuncs.com/命名空间` |
+| 腾讯云 CCR | `ccr.ccs.tencentcloud.com/命名空间` |
+
+> 推送前请先 `docker login`；推送仅支持单架构构建。
+
+### 历史记录
+
+每次打包自动记录（时间、镜像、端口、架构、来源、状态），存于 `%APPDATA%\DockerPack\history.json`。在「历史记录」页选中一条，点「用选中记录重新打包」即可回填全部配置重新构建。
+
+### 构建加速
+
+Node / Python / Maven / Gradle / Go 模板内置 **BuildKit 依赖缓存挂载**，依赖层跨构建复用，二次打包大幅提速。需 Docker 20.10+（Docker Desktop 默认支持）。
+
+---
+
+## 🩺 构建后自检
+
+单架构构建完成后自动：启动容器 → 轮询 30 秒 → 探测端口 → 自动清理。日志显示 `✓ 自检通过` / `△ 端口暂不可达` / `✗ 容器提前退出（附日志）`。**自检失败不影响 tar 导出**。
+
+---
+
 ## 📦 产物使用
 
-打包完成后你会得到一个 `.tar` 文件，在目标服务器上导入：
+打包完成得到 `.tar` 文件，在目标服务器上导入：
 
 ```bash
 # 导入镜像
@@ -225,7 +193,7 @@ docker load -i my-app_v1.0.tar
 # 查看镜像
 docker images
 
-# 运行容器（注意端口映射要和你填的端口一致）
+# 运行容器（端口映射要与填的端口一致）
 docker run -d -p 8080:8080 my-app:v1.0
 
 # 浏览器访问
@@ -234,26 +202,51 @@ http://服务器IP:8080
 
 ---
 
-## 🛠️ 从源码运行
+## ❓ 常见问题
+
+| 问题 | 解决方法 |
+|---|---|
+| 双击 exe 无反应 | 右键 → 以管理员身份运行；或检查杀毒软件隔离区 |
+| 提示未检测到 docker | 安装并启动 Docker Desktop |
+| 打 ARM 架构很慢 | QEMU 模拟正常现象，建议在 ARM 机器上直接构建 |
+| 多架构无法推送 | OCI 产物不进入本地仓库，请用单架构构建后推送 |
+| git clone 失败 | 检查网络；私有仓库需提前配置好 Git 凭据 |
+
+---
+
+## 🌍 Web 部署版
+
+工具本身可 Docker 化部署，浏览器访问、多人共用：
 
 ```bash
-# 克隆仓库
+cd docker-pack-gui/web
+docker build -t docker-pack-web .
+docker run -d -p 8000:8000 \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v /data/docker-pack-web:/data \
+    docker-pack-web
+```
+
+浏览器访问 `http://服务器IP:8000`，功能与 exe 版一致。
+
+---
+
+## 🛠️ 从源码构建
+
+```bash
 git clone https://github.com/y50008/docker-pack.git
 cd docker-pack-gui
 
-# 直接运行（需要 Python 3.10+）
+# 直接运行（开发用）
 python pack_gui.py
-```
 
-### 打包成 exe
-
-```bash
+# 打包成 exe（需 Python 3.10+）
 pip install pyinstaller
-# 注意：--collect-all tkinter 必须带上，否则 exe 会因缺少 Tcl/Tk 脚本库报 "No module named 'tkinter'"
 pyinstaller --onefile --windowed --name DockerPack --collect-all tkinter pack_gui.py
 ```
 
-生成的 exe 在 `dist/DockerPack.exe`。
+> ⚠️ `--collect-all tkinter` 必须带上，否则 exe 会因缺少 Tcl/Tk 脚本库报 `No module named 'tkinter'`。
+> 推荐用完整版 Python 打包（非精简发行版），确保 tkinter 脚本文件齐全。
 
 ---
 
@@ -262,19 +255,19 @@ pyinstaller --onefile --windowed --name DockerPack --collect-all tkinter pack_gu
 ```
 docker-pack-gui/
 ├── pack_gui.py      # tkinter GUI 主程序（exe 版界面）
-├── core.py          # 核心逻辑：项目检测、Dockerfile 生成、git clone、docker build/save、构建后自检
+├── core.py          # 核心逻辑：23 种类型检测、Dockerfile 生成、构建/自检/compose/推送
 ├── web_app.py       # Web 版后端（Flask API，复用 core.py）
 ├── templates/
 │   └── index.html   # Web 版前端页面
 ├── web/
-│   ├── Dockerfile   # Web 版自身镜像（部署用）
+│   ├── Dockerfile   # Web 版自身镜像
 │   └── requirements.txt
 ├── docs/
-│   └── screenshot.png   # 界面示意图
-├── README.md        # 本文件
-├── .gitignore
+│   └── screenshot.png
+├── test_frameworks.py / test_upgrades.py / test_frameworks2.py
+├── README.md
 └── dist/
-    └── DockerPack.exe   # 打包好的可执行程序
+    └── DockerPack.exe   # 双击即用的可执行程序
 ```
 
 ---
@@ -283,4 +276,4 @@ docker-pack-gui/
 
 本项目仅供学习交流使用，转载请注明出处。
 
-作者：**y50008** ｜ 来源：**www.52pojie.com**
+作者：**y50008**
