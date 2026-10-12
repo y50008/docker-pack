@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pack_gui.py — Docker 打包工具可视化界面
+pack_gui.py — Docker 打包工具可视化界面（v1.2）
+新增：一键 Compose、镜像推送、历史记录、构建加速
 """
 
+import json
 import os
 import queue
-import subprocess
-import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -15,27 +16,43 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 # 兼容 PyInstaller 打包后的导入
-sys.path.insert(0, str(Path(__file__).parent))
-import core
+sys_path_ok = False
+try:
+    import core
+    sys_path_ok = True
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    import core
+
+# 历史记录文件（%APPDATA%/DockerPack/history.json）
+HISTORY_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DockerPack"
+HISTORY_FILE = HISTORY_DIR / "history.json"
 
 
 class PackApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("Docker 项目打包工具")
-        root.geometry("860x720")
-        root.minsize(780, 640)
+        root.title("Docker 项目打包工具 v1.2")
+        root.geometry("880x780")
+        root.minsize(800, 680)
 
         self.msg_queue: queue.Queue = queue.Queue()
         self.temp_dirs: list[Path] = []
         self.final_tar: Path | None = None
+        self.final_compose: Path | None = None
         self.start_time: float = 0.0
         self.building = False
+        self.history: list[dict] = []
 
         self._build_ui()
+        self._load_history()
+        self._refresh_history()
         self._print_banner()
         self.root.after(100, self._poll_queue)
         self.root.after(500, self._update_eta)
+
+    # ---------- 作者信息 ----------
 
     def _print_banner(self):
         """启动时输出绿色作者信息"""
@@ -50,7 +67,7 @@ class PackApp:
     # ---------- UI ----------
 
     def _build_ui(self):
-        pad = {"padx": 8, "pady": 4}
+        pad = {"padx": 8, "pady": 3}
 
         # 1. 源码来源
         frm_src = ttk.LabelFrame(self.root, text="① 选择源码来源")
@@ -63,12 +80,12 @@ class PackApp:
                         value="git", command=self._on_mode_change).grid(row=0, column=1, sticky="w", padx=8)
 
         self.local_entry = ttk.Entry(frm_src)
-        self.local_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=4)
+        self.local_entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=3)
         self.browse_btn = ttk.Button(frm_src, text="浏览...", command=self._browse_local)
         self.browse_btn.grid(row=1, column=2, padx=8)
 
         self.git_entry = ttk.Entry(frm_src)
-        self.git_entry.grid(row=2, column=0, columnspan=3, sticky="ew", padx=8, pady=4)
+        self.git_entry.grid(row=2, column=0, columnspan=3, sticky="ew", padx=8, pady=3)
         self.git_entry.grid_remove()
 
         frm_src.columnconfigure(0, weight=1)
@@ -79,15 +96,15 @@ class PackApp:
         frm_img = ttk.LabelFrame(self.root, text="② 镜像配置")
         frm_img.pack(fill="x", **pad)
 
-        ttk.Label(frm_img, text="镜像名:").grid(row=0, column=0, padx=6, pady=6, sticky="e")
+        ttk.Label(frm_img, text="镜像名:").grid(row=0, column=0, padx=6, pady=5, sticky="e")
         self.name_var = tk.StringVar(value="my-app")
         ttk.Entry(frm_img, textvariable=self.name_var, width=24).grid(row=0, column=1, padx=4)
 
-        ttk.Label(frm_img, text="标签:").grid(row=0, column=2, padx=6, pady=6)
+        ttk.Label(frm_img, text="标签:").grid(row=0, column=2, padx=6, pady=5)
         self.tag_var = tk.StringVar(value="latest")
         ttk.Entry(frm_img, textvariable=self.tag_var, width=12).grid(row=0, column=3, padx=4)
 
-        ttk.Label(frm_img, text="暴露端口:").grid(row=0, column=4, padx=6, pady=6)
+        ttk.Label(frm_img, text="暴露端口:").grid(row=0, column=4, padx=6, pady=5)
         self.port_var = tk.StringVar(value="8080")
         ttk.Entry(frm_img, textvariable=self.port_var, width=8).grid(row=0, column=5, padx=4)
 
@@ -95,29 +112,61 @@ class PackApp:
         frm_arch = ttk.LabelFrame(self.root, text="③ 选择目标架构（可多选）")
         frm_arch.pack(fill="x", **pad)
 
-        # (变量, 显示文本, 平台ID)
         self.arch_options = [
-            (tk.BooleanVar(value=True),  "linux/amd64",  "x86_64：普通 PC / 绝大多数云服务器"),
-            (tk.BooleanVar(value=False), "linux/arm64",  "aarch64：AWS Graviton / Apple M / 阿里云 ARM / 树莓派5"),
-            (tk.BooleanVar(value=False), "linux/arm/v7", "32位 ARM：树莓派3/4 老系统 / IoT 设备"),
-            (tk.BooleanVar(value=False), "linux/riscv64","RISC-V：新兴开发板 / 边缘计算"),
+            (tk.BooleanVar(value=True),  "linux/amd64",  "x86_64：普通 PC / 云服务器"),
+            (tk.BooleanVar(value=False), "linux/arm64",  "ARM 服务器 / Apple M / 树莓派5"),
+            (tk.BooleanVar(value=False), "linux/arm/v7", "树莓派3/4 老系统 / IoT"),
+            (tk.BooleanVar(value=False), "linux/riscv64","RISC-V 开发板 / 边缘计算"),
         ]
         self.arch_all = tk.BooleanVar(value=False)
 
         for i, (var, pid, desc) in enumerate(self.arch_options):
             row = i // 2
             col = i % 2
-            ttk.Checkbutton(frm_arch, text=f"{pid}  —  {desc}",
+            ttk.Checkbutton(frm_arch, text=f"{pid} — {desc}",
                            variable=var,
-                           command=self._on_arch_change).grid(row=row, column=col, sticky="w", padx=10, pady=3)
+                           command=self._on_arch_change).grid(row=row, column=col, sticky="w", padx=10, pady=2)
 
-        ttk.Checkbutton(frm_arch, text="全部常用架构（amd64 + arm64 + arm/v7 + riscv64，构建最慢）",
+        ttk.Checkbutton(frm_arch, text="全部常用架构（构建最慢）",
                         variable=self.arch_all,
-                        command=self._on_arch_all).grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=4)
+                        command=self._on_arch_all).grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=2)
 
-        # 4. 操作按钮
-        frm_btn = ttk.Frame(self.root)
-        frm_btn.pack(fill="x", **pad)
+        # 4. 部署选项（Compose + 推送）
+        frm_opt = ttk.LabelFrame(self.root, text="④ 部署选项（可选）")
+        frm_opt.pack(fill="x", **pad)
+
+        self.gen_compose = tk.BooleanVar(value=False)
+        self.compose_mysql = tk.BooleanVar(value=False)
+        self.compose_redis = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frm_opt, text="生成 docker-compose.yml", variable=self.gen_compose
+                        ).grid(row=0, column=0, sticky="w", padx=10)
+        ttk.Checkbutton(frm_opt, text="附带 MySQL", variable=self.compose_mysql
+                        ).grid(row=0, column=1, sticky="w", padx=10)
+        ttk.Checkbutton(frm_opt, text="附带 Redis", variable=self.compose_redis
+                        ).grid(row=0, column=2, sticky="w", padx=10)
+        ttk.Label(frm_opt, text="数据库密码:").grid(row=0, column=3, padx=6, sticky="e")
+        self.db_pass_var = tk.StringVar(value="change-me")
+        ttk.Entry(frm_opt, textvariable=self.db_pass_var, width=14, show="*").grid(row=0, column=4, padx=4)
+
+        self.push_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frm_opt, text="构建后推送镜像", variable=self.push_enable
+                        ).grid(row=1, column=0, sticky="w", padx=10, pady=(6, 2))
+        ttk.Label(frm_opt, text="仓库地址:").grid(row=1, column=1, padx=6, pady=(6, 2), sticky="e")
+        self.registry_var = tk.StringVar(value="registry.cn-hangzhou.aliyuncs.com/your-namespace")
+        ttk.Entry(frm_opt, textvariable=self.registry_var, width=42).grid(row=1, column=2, columnspan=3,
+                                                                           sticky="ew", padx=4, pady=(6, 2))
+        frm_opt.columnconfigure(2, weight=1)
+
+        # 5. Notebook：构建 / 历史
+        self.nb = ttk.Notebook(self.root)
+        self.nb.pack(fill="both", expand=True, padx=8, pady=6)
+
+        # --- Tab1: 构建 ---
+        tab_build = ttk.Frame(self.nb)
+        self.nb.add(tab_build, text="  构建  ")
+
+        frm_btn = ttk.Frame(tab_build)
+        frm_btn.pack(fill="x", padx=8, pady=6)
 
         self.build_btn = ttk.Button(frm_btn, text="开始打包", command=self._start_build)
         self.build_btn.pack(side="left", padx=8)
@@ -126,12 +175,15 @@ class PackApp:
                                        command=self._download_tar, state="disabled")
         self.download_btn.pack(side="left", padx=8)
 
+        self.compose_btn = ttk.Button(frm_btn, text="下载 docker-compose.yml",
+                                      command=self._download_compose, state="disabled")
+        self.compose_btn.pack(side="left", padx=8)
+
         self.status_label = ttk.Label(frm_btn, text="就绪", foreground="gray")
         self.status_label.pack(side="right", padx=12)
 
-        # 5. 进度条 + 预计时间
-        frm_prog = ttk.Frame(self.root)
-        frm_prog.pack(fill="x", padx=8, pady=4)
+        frm_prog = ttk.Frame(tab_build)
+        frm_prog.pack(fill="x", padx=8, pady=2)
 
         self.progress = ttk.Progressbar(frm_prog, mode="determinate", maximum=100)
         self.progress.pack(fill="x", side="top")
@@ -139,18 +191,38 @@ class PackApp:
         self.eta_label = ttk.Label(frm_prog, text="")
         self.eta_label.pack(anchor="w", pady=2)
 
-        # 6. 日志窗口
-        frm_log = ttk.LabelFrame(self.root, text="构建日志")
+        frm_log = ttk.LabelFrame(tab_build, text="构建日志")
         frm_log.pack(fill="both", expand=True, padx=8, pady=6)
 
         self.log_text = tk.Text(frm_log, wrap="word", state="disabled",
                                 bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 9))
-        # 配置绿色 tag，用于作者信息等醒目提示
         self.log_text.tag_configure("green", foreground="#4ee44e", font=("Consolas", 20, "bold"))
         scroll = ttk.Scrollbar(frm_log, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+
+        # --- Tab2: 历史记录 ---
+        tab_hist = ttk.Frame(self.nb)
+        self.nb.add(tab_hist, text="  历史记录  ")
+
+        frm_hist_btn = ttk.Frame(tab_hist)
+        frm_hist_btn.pack(fill="x", padx=8, pady=6)
+
+        ttk.Button(frm_hist_btn, text="用选中记录重新打包",
+                   command=self._rebuild_from_history).pack(side="left", padx=8)
+        ttk.Button(frm_hist_btn, text="刷新", command=self._refresh_history).pack(side="left", padx=8)
+        ttk.Button(frm_hist_btn, text="清空历史", command=self._clear_history).pack(side="left", padx=8)
+
+        cols = ("time", "image", "port", "arch", "source", "status")
+        self.hist_tree = ttk.Treeview(tab_hist, columns=cols, show="headings", height=14)
+        headers = {"time": ("时间", 130), "image": ("镜像", 170), "port": ("端口", 60),
+                   "arch": ("架构", 120), "source": ("来源", 130), "status": ("状态", 80)}
+        for c, (text, w) in headers.items():
+            self.hist_tree.heading(c, text=text)
+            self.hist_tree.column(c, width=w, anchor="w")
+        self.hist_tree.pack(fill="both", expand=True, padx=8, pady=4)
+        self.hist_tree.bind("<Double-1>", lambda e: self._rebuild_from_history())
 
     # ---------- 交互 ----------
 
@@ -169,11 +241,9 @@ class PackApp:
         if d:
             self.local_entry.delete(0, tk.END)
             self.local_entry.insert(0, d)
-            # 自动把目录名填成镜像名
             self.name_var.set(Path(d).name.lower().replace("_", "-"))
 
     def _on_arch_change(self):
-        # 至少保留一个
         if not any(v.get() for v, _, _ in self.arch_options):
             self.arch_options[0][0].set(True)
         self.arch_all.set(False)
@@ -185,9 +255,82 @@ class PackApp:
 
     def _collect_platforms(self) -> list[str]:
         selected = [pid for var, pid, _ in self.arch_options if var.get()]
-        if not selected:
-            selected = ["linux/amd64"]
-        return selected
+        return selected or ["linux/amd64"]
+
+    # ---------- 历史记录 ----------
+
+    def _load_history(self):
+        try:
+            if HISTORY_FILE.exists():
+                self.history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+                if not isinstance(self.history, list):
+                    self.history = []
+        except Exception:
+            self.history = []
+
+    def _save_history(self):
+        try:
+            HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+            HISTORY_FILE.write_text(
+                json.dumps(self.history[:100], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _add_history(self, rec: dict):
+        rec["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.history.insert(0, rec)
+        self._save_history()
+        self._refresh_history()
+
+    def _refresh_history(self):
+        for item in self.hist_tree.get_children():
+            self.hist_tree.delete(item)
+        for rec in self.history[:50]:
+            self.hist_tree.insert("", "end", values=(
+                rec.get("time", ""),
+                f"{rec.get('name', '')}:{rec.get('tag', '')}",
+                rec.get("port", ""),
+                ", ".join(p.split("/")[-1] for p in rec.get("platforms", [])),
+                rec.get("source", ""),
+                rec.get("status", ""),
+            ))
+
+    def _clear_history(self):
+        if messagebox.askyesno("确认", "确定清空全部历史记录？"):
+            self.history = []
+            self._save_history()
+            self._refresh_history()
+
+    def _rebuild_from_history(self):
+        sel = self.hist_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在历史列表中选择一条记录")
+            return
+        idx = self.hist_tree.index(sel[0])
+        if idx >= len(self.history):
+            return
+        rec = self.history[idx]
+        # 回填表单
+        self.name_var.set(rec.get("name", "my-app"))
+        self.tag_var.set(rec.get("tag", "latest"))
+        self.port_var.set(str(rec.get("port", 8080)))
+        if rec.get("source_type") == "git":
+            self.src_mode.set("git")
+            self.git_entry.delete(0, tk.END)
+            self.git_entry.insert(0, rec.get("source", ""))
+        else:
+            self.src_mode.set("local")
+            self.local_entry.delete(0, tk.END)
+            self.local_entry.insert(0, rec.get("source", ""))
+        self._on_mode_change()
+        # 架构
+        want = rec.get("platforms", ["linux/amd64"])
+        for var, pid, _ in self.arch_options:
+            var.set(pid in want)
+        self.nb.select(0)  # 切回构建页
+        self._start_build()
 
     # ---------- 构建 ----------
 
@@ -195,7 +338,6 @@ class PackApp:
         if self.building:
             return
 
-        # 校验输入
         if self.src_mode.get() == "local":
             src = self.local_entry.get().strip()
             if not src or not Path(src).is_dir():
@@ -205,9 +347,9 @@ class PackApp:
         else:
             url = self.git_entry.get().strip()
             if not core.is_git_url(url):
-                messagebox.showerror("错误", "请输入有效的项目地址（https://github.com/xxx/xxx.git 或其他 Git 仓库地址）")
+                messagebox.showerror("错误", "请输入有效的项目地址（https://... 或 git@...）")
                 return
-            source_dir = None  # clone 后确定
+            source_dir = None
 
         name = self.name_var.get().strip() or "my-app"
         tag = self.tag_var.get().strip() or "latest"
@@ -218,13 +360,27 @@ class PackApp:
             return
 
         platforms = self._collect_platforms()
+        registry = self.registry_var.get().strip().rstrip("/")
+        push = self.push_enable.get()
+        if push and not registry:
+            messagebox.showerror("错误", "勾选推送后请填写镜像仓库地址")
+            return
+        gen_compose = self.gen_compose.get()
+        db_pass = self.db_pass_var.get().strip() or "change-me"
 
-        # 准备输出 tar 路径（临时目录）
         out_dir = Path(tempfile.gettempdir()) / "docker_pack_out"
         out_dir.mkdir(exist_ok=True)
         out_tar = out_dir / f"{name.replace('/', '_')}_{tag}_{'multi' if len(platforms)>1 else platforms[0].replace('/','_')}.tar"
         if out_tar.exists():
             out_tar.unlink()
+
+        # 记录历史
+        self._add_history({
+            "source_type": self.src_mode.get(),
+            "source": src if self.src_mode.get() == "local" else self.git_entry.get().strip(),
+            "name": name, "tag": tag, "port": port,
+            "platforms": platforms, "status": "进行中",
+        })
 
         # 重置 UI
         self.log_text.configure(state="normal")
@@ -233,28 +389,37 @@ class PackApp:
         self._print_banner()
         self.progress["value"] = 0
         self.download_btn.configure(state="disabled")
+        self.compose_btn.configure(state="disabled")
         self.build_btn.configure(state="disabled", text="打包中...")
         self.status_label.configure(text="构建中...", foreground="orange")
         self.final_tar = None
+        self.final_compose = None
         self.start_time = time.time()
         self.building = True
 
-        # 启动子线程
+        opts = {
+            "name": name, "tag": tag, "port": port, "platforms": platforms,
+            "registry": registry, "push": push,
+            "gen_compose": gen_compose,
+            "compose_mysql": self.compose_mysql.get(),
+            "compose_redis": self.compose_redis.get(),
+            "db_pass": db_pass,
+        }
         t = threading.Thread(
             target=self._build_worker,
-            args=(source_dir, url if source_dir is None else None, name, tag, port, platforms, out_tar),
+            args=(source_dir, self.git_entry.get().strip() if source_dir is None else None,
+                  out_tar, opts),
             daemon=True,
         )
         t.start()
 
-    def _build_worker(self, source_dir: Path | None, git_url: str | None,
-                      name: str, tag: str, port: int,
-                      platforms: list[str], out_tar: Path):
+    def _build_worker(self, source_dir, git_url, out_tar, opts):
         try:
             self._log(f"=== 开始任务 ===")
-            self._log(f"镜像: {name}:{tag}  端口: {port}  架构: {platforms}")
+            self._log(f"镜像: {opts['name']}:{opts['tag']}  端口: {opts['port']}  架构: {opts['platforms']}")
+            if opts["push"]:
+                self._log(f"[push] 将推送到: {opts['registry']}")
 
-            # 如果是 git，先 clone
             if git_url:
                 tmp = Path(tempfile.mkdtemp(prefix="docker_pack_src_"))
                 self.temp_dirs.append(tmp)
@@ -265,23 +430,42 @@ class PackApp:
 
             core.build_and_export(
                 source_dir=source_dir,
-                image_name=name,
-                tag=tag,
-                port=port,
-                platforms=platforms,
+                image_name=opts["name"],
+                tag=opts["tag"],
+                port=opts["port"],
+                platforms=opts["platforms"],
                 output_tar=out_tar,
                 log=self._log,
                 progress=self._progress,
+                push_registry=opts["registry"],
+                push=opts["push"],
             )
 
             self.final_tar = out_tar
+
+            # 生成 compose
+            compose_path = None
+            if opts["gen_compose"]:
+                compose_text = core.generate_compose(
+                    opts["name"], opts["tag"], opts["port"],
+                    include_mysql=opts["compose_mysql"],
+                    include_redis=opts["compose_redis"],
+                    db_password=opts["db_pass"],
+                )
+                compose_path = out_tar.with_suffix(".compose.yml")
+                compose_path.write_text(compose_text, encoding="utf-8", newline="\n")
+                self.final_compose = compose_path
+                self._log(f"[compose] 已生成 {compose_path}")
+                self._log("[compose] 内容预览：\n" + compose_text)
+
             self._log(f"=== 全部完成，产物: {out_tar} ===")
-            self.msg_queue.put(("done", None))
+            self.msg_queue.put(("done", {"tar": str(out_tar),
+                                         "compose": str(compose_path) if compose_path else None}))
         except Exception as e:
             self._log(f"[ERROR] {e}")
             self.msg_queue.put(("error", str(e)))
 
-    # ---------- 线程安全的回调 ----------
+    # ---------- 线程安全回调 ----------
 
     def _log(self, line: str):
         self.msg_queue.put(("log", line))
@@ -305,12 +489,24 @@ class PackApp:
                     self.building = False
                     self.build_btn.configure(state="normal", text="开始打包")
                     self.download_btn.configure(state="normal")
+                    if payload and payload.get("compose"):
+                        self.compose_btn.configure(state="normal")
                     self.status_label.configure(text="✓ 构建完成，可下载", foreground="green")
-                    messagebox.showinfo("完成", "镜像打包完成！点击「下载」按钮保存文件。")
+                    # 更新历史状态
+                    if self.history:
+                        self.history[0]["status"] = "完成"
+                        self.history[0]["tar"] = payload.get("tar", "") if payload else ""
+                        self._save_history()
+                        self._refresh_history()
+                    messagebox.showinfo("完成", "镜像打包完成！点击「下载打包好的镜像文件」保存。")
                 elif kind == "error":
                     self.building = False
                     self.build_btn.configure(state="normal", text="开始打包")
                     self.status_label.configure(text="✗ 构建失败", foreground="red")
+                    if self.history:
+                        self.history[0]["status"] = "失败"
+                        self._save_history()
+                        self._refresh_history()
                     messagebox.showerror("构建失败", payload)
         except queue.Empty:
             pass
@@ -358,10 +554,25 @@ class PackApp:
         self._append_log(f"[save] 已保存到: {dest}")
         messagebox.showinfo("完成", f"镜像文件已保存到:\n{dest}\n\n在目标机器上用 docker load -i {Path(dest).name} 即可导入。")
 
+    def _download_compose(self):
+        if not self.final_compose or not self.final_compose.exists():
+            messagebox.showwarning("提示", "还没有可下载的 compose 文件")
+            return
+        dest = filedialog.asksaveasfilename(
+            defaultextension=".yml",
+            initialfile=self.final_compose.name,
+            filetypes=[("YAML 文件", "*.yml"), ("所有文件", "*.*")],
+            title="保存 docker-compose.yml 到...",
+        )
+        if not dest:
+            return
+        import shutil
+        shutil.copy2(self.final_compose, dest)
+        self._append_log(f"[save] compose 已保存到: {dest}")
+
 
 def main():
     root = tk.Tk()
-    # 适配高 DPI
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)

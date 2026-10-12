@@ -6,7 +6,7 @@
 
 作者：y50008 ｜ 来源：www.52pojie.com ｜ 开源地址：https://github.com/y50008/docker-pack
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-yellow)
 ![Docker](https://img.shields.io/badge/docker-required-2496ED)
@@ -21,6 +21,8 @@ Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。�
 
 **无需手写 Dockerfile，无需记 docker build 命令，小白也能打出生产级镜像。**
 
+> 🆕 **v1.2 新增**：一键生成 docker-compose.yml、构建后推送镜像到仓库、打包历史记录（一键重新打包）、BuildKit 依赖缓存加速。
+>
 > 🆕 **v1.1 新增**：专项框架模板（Next.js / Django / FastAPI / Spring Boot）、构建后容器自检、**Web 部署版**（浏览器访问，多人共用）。
 
 ![工具界面示意图](docs/screenshot.png)
@@ -38,6 +40,10 @@ Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。�
 | ⏱️ **实时进度** | 进度条 + 已用时 + 预计剩余时间 + 实时日志 |
 | 📦 **一键导出 tar** | 构建完成后点下载，选择保存位置即可 |
 | 🩺 **构建后自检** | 打包完自动运行容器 + 探测端口，验证镜像真能跑 |
+| 🧩 **一键 Compose** | 打包完顺手生成 docker-compose.yml（可选附带 MySQL/Redis） |
+| 🚀 **镜像推送** | 支持推送到 Docker Hub / 阿里云 ACR / 腾讯云 CCR |
+| 🕘 **历史记录** | 自动记录每次打包，一键回填配置重新打包 |
+| ⚡ **构建加速** | BuildKit 依赖缓存挂载，二次构建依赖层秒级复用 |
 | 🌍 **Web 部署版** | 工具本身可 Docker 化部署，浏览器操作、多人共用 |
 | 🇨🇳 **国内镜像源** | npm / pip / Go proxy 默认切国内源，构建更快 |
 | 📦 **多阶段构建** | 自动生成精简镜像，体积最小化 |
@@ -61,8 +67,66 @@ Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。�
    - 🌐 项目地址：输入 GitHub/Gitee 仓库 URL
 4. **配置镜像**：镜像名、标签（tag）、暴露端口
 5. **选择目标架构**：默认 amd64，需要 ARM 服务器就勾选 arm64
-6. **点击「开始打包」**，观察实时日志和进度
-7. **打包完成后点「下载打包好的镜像文件」**，选择保存位置
+6. **（可选）部署选项**：勾选「生成 docker-compose.yml」可一并产出部署编排文件；勾选「构建后推送镜像」并填仓库地址，打包完自动推送
+7. **点击「开始打包」**，观察实时日志和进度
+8. **打包完成后点「下载打包好的镜像文件」**，选择保存位置；「历史记录」页可一键重新打包
+
+---
+
+## 🧩 部署选项（v1.2 新增）
+
+### 一键生成 docker-compose.yml
+
+勾选「生成 docker-compose.yml」后，打包完成会自动生成编排文件，可选附带 **MySQL 8** 和 **Redis 7** 服务：
+
+```yaml
+version: "3.8"
+services:
+  app:
+    image: my-app:latest
+    container_name: my-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=Asia/Shanghai
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: change-me
+      MYSQL_DATABASE: app
+    volumes:
+      - mysql-data:/var/lib/mysql
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+volumes:
+  mysql-data:
+  redis-data:
+```
+
+部署时只需一条命令：`docker compose up -d`。
+
+### 镜像推送
+
+勾选「构建后推送镜像」并填写仓库地址（如 `registry.cn-hangzhou.aliyuncs.com/你的命名空间`），构建完成后自动执行 `docker push`：
+
+| 目标 | 仓库地址示例 |
+|---|---|
+| Docker Hub | `你的用户名`（推送到 `你的用户名/镜像名:标签`） |
+| 阿里云 ACR | `registry.cn-hangzhou.aliyuncs.com/命名空间` |
+| 腾讯云 CCR | `ccr.ccs.tencentcloud.com/命名空间` |
+
+> 💡 推送前请先在本机执行 `docker login` 登录对应仓库；推送仅支持单架构构建（多架构 OCI 产物不进入本地仓库，无法 push）。
+
+### 历史记录
+
+每次打包自动记录（时间、镜像、端口、架构、来源、状态），存在 `%APPDATA%\DockerPack\history.json`。在「历史记录」页选中一条，点「用选中记录重新打包」即可回填全部配置并重新构建。
+
+### 构建加速
+
+Node / Python / Maven / Gradle / Go 模板已内置 **BuildKit 依赖缓存挂载**（`--mount=type=cache`），依赖层缓存可跨构建复用，二次打包速度大幅提升。需 Docker 20.10+（Docker Desktop 默认支持）。
 
 ---
 
@@ -185,7 +249,8 @@ python pack_gui.py
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name DockerPack pack_gui.py
+# 注意：--collect-all tkinter 必须带上，否则 exe 会因缺少 Tcl/Tk 脚本库报 "No module named 'tkinter'"
+pyinstaller --onefile --windowed --name DockerPack --collect-all tkinter pack_gui.py
 ```
 
 生成的 exe 在 `dist/DockerPack.exe`。

@@ -45,7 +45,8 @@ DOCKERFILES = {
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm config set registry https://registry.npmmirror.com \\
+RUN --mount=type=cache,target=/root/.npm \\
+ npm config set registry https://registry.npmmirror.com \\
  && (npm ci || npm install)
 COPY . .
 RUN npm run build --if-present
@@ -54,7 +55,8 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=builder /app/package*.json ./
-RUN npm config set registry https://registry.npmmirror.com \\
+RUN --mount=type=cache,target=/root/.npm \\
+ npm config set registry https://registry.npmmirror.com \\
  && npm ci --only=production \\
  && npm cache clean --force
 COPY --from=builder /app/dist ./dist
@@ -65,9 +67,11 @@ CMD ["node", "dist/index.js"]
     ProjectType.PYTHON: """\
 FROM python:3.11-slim AS builder
 WORKDIR /app
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+RUN --mount=type=cache,target=/root/.cache/pip \\
+ pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 COPY requirements.txt .
-RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \\
+ pip wheel --wheel-dir /wheels -r requirements.txt
 
 FROM python:3.11-slim AS runner
 WORKDIR /app
@@ -84,9 +88,9 @@ CMD ["python", "app.py"]
 FROM maven:3.9-eclipse-temurin-21 AS builder
 WORKDIR /app
 COPY pom.xml .
-RUN mvn dependency:go-offline -B -DskipTests
+RUN --mount=type=cache,target=/root/.m2 mvn dependency:go-offline -B -DskipTests
 COPY src ./src
-RUN mvn package -B -DskipTests
+RUN --mount=type=cache,target=/root/.m2 mvn package -B -DskipTests
 
 FROM eclipse-temurin:21-jre-alpine AS runner
 WORKDIR /app
@@ -98,9 +102,9 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 FROM gradle:8-jdk21 AS builder
 WORKDIR /app
 COPY build.gradle settings.gradle ./
-RUN gradle dependencies --no-daemon || true
+RUN --mount=type=cache,target=/root/.gradle gradle dependencies --no-daemon || true
 COPY . .
-RUN gradle bootJar -x test --no-daemon
+RUN --mount=type=cache,target=/root/.gradle gradle bootJar -x test --no-daemon
 
 FROM eclipse-temurin:21-jre-alpine AS runner
 WORKDIR /app
@@ -113,9 +117,10 @@ FROM golang:1.22-alpine AS builder
 WORKDIR /app
 ENV GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/server .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \\
+ CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/server .
 
 FROM alpine:3.19 AS runner
 WORKDIR /app
@@ -497,6 +502,83 @@ def git_clone(url: str, dest: Path, log: Callable[[str], None]) -> Path:
 STEP_RE = re.compile(r"Step\s+(\d+)/(\d+)\s*:")
 
 
+def generate_compose(
+    image_name: str,
+    tag: str,
+    port: int,
+    include_mysql: bool = False,
+    include_redis: bool = False,
+    db_password: str = "change-me",
+) -> str:
+    """生成 docker-compose.yml 文本（app 服务 + 可选 MySQL/Redis）"""
+    full_tag = f"{image_name}:{tag}"
+    lines = [
+        'version: "3.8"',
+        "",
+        "services:",
+        f"  app:",
+        f"    image: {full_tag}",
+        f"    container_name: {image_name.replace('/', '-')}",
+        "    restart: unless-stopped",
+        f'    ports:',
+        f'      - "{port}:{port}"',
+        "    environment:",
+        "      - TZ=Asia/Shanghai",
+    ]
+    if include_mysql:
+        lines += [
+            "    depends_on:",
+            "      - mysql",
+            "    environment:",
+            "      - DB_HOST=mysql",
+            "      - DB_PORT=3306",
+            "      - DB_NAME=app",
+            f"      - DB_PASSWORD={db_password}",
+        ]
+    if include_redis:
+        lines += [
+            "    depends_on:",
+            "      - redis",
+            "    environment:",
+            "      - REDIS_HOST=redis",
+            "      - REDIS_PORT=6379",
+        ]
+    lines += ["    # volumes:", "    #   - app-data:/data"]
+    if include_mysql:
+        lines += [
+            "",
+            "  mysql:",
+            "    image: mysql:8.0",
+            "    restart: unless-stopped",
+            "    environment:",
+            "      - MYSQL_ROOT_PASSWORD=" + db_password,
+            "      - MYSQL_DATABASE=app",
+            "    volumes:",
+            "      - mysql-data:/var/lib/mysql",
+            "    ports:",
+            '      - "3306:3306"',
+        ]
+    if include_redis:
+        lines += [
+            "",
+            "  redis:",
+            "    image: redis:7-alpine",
+            "    restart: unless-stopped",
+            "    volumes:",
+            "      - redis-data:/data",
+            "    ports:",
+            '      - "6379:6379"',
+        ]
+    lines += ["", "volumes:"]
+    if include_mysql:
+        lines += ["  mysql-data:"]
+    if include_redis:
+        lines += ["  redis-data:"]
+    if not (include_mysql or include_redis):
+        lines += ["  # app-data:"]
+    return "\n".join(lines) + "\n"
+
+
 def build_and_export(
     source_dir: Path,
     image_name: str,
@@ -506,10 +588,12 @@ def build_and_export(
     output_tar: Path,
     log: Callable[[str], None],
     progress: Callable[[float, str], None],
+    push_registry: str = "",      # 例如 registry.cn-hangzhou.aliyuncs.com/your-ns
+    push: bool = False,
 ) -> None:
     """
     构建镜像并导出为 tar 文件。
-    - 单架构：docker build → docker save
+    - 单架构：docker build → docker save → (可选) docker push
     - 多架构：docker buildx build --output type=oci,dest=...
     """
     if shutil.which("docker") is None:
@@ -520,8 +604,11 @@ def build_and_export(
     prepare_dockerfile(source_dir, ptype, port, log=log)
     log(f"[detect] Dockerfile / .dockerignore 就绪")
 
-    full_tag = f"{image_name}:{tag}"
     multi_arch = len(platforms) > 1
+    if push_registry:
+        push_registry = push_registry.rstrip("/")
+    full_tag = f"{image_name}:{tag}"
+    push_tag = f"{push_registry}/{full_tag}" if push_registry else full_tag
 
     if multi_arch:
         platform_str = ",".join(platforms)
@@ -549,6 +636,23 @@ def build_and_export(
             raise RuntimeError(f"docker save 失败: {rc.stdout}")
         # 单架构镜像已进入本地仓库，可以做运行自检
         _self_check(full_tag, port, log)
+
+    # 可选推送（仅单架构；多架构产物未进本地仓库，无法 push）
+    if push:
+        if multi_arch:
+            log("[push] 多架构 OCI 产物未进入本地仓库，跳过推送（如需多架构推送请用 buildx --push）")
+        else:
+            if not push_registry:
+                raise RuntimeError("请填写镜像仓库地址（如 registry.cn-hangzhou.aliyuncs.com/your-ns）后再推送")
+            log(f"[push] 推送镜像: {push_tag}")
+            rc = subprocess.run(
+                ["docker", "push", push_tag],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            if rc.returncode != 0:
+                raise RuntimeError(f"docker push 失败（请先 docker login）: {rc.stdout}")
+            log(f"[push] ✓ 推送完成: {push_tag}")
 
     log(f"[done] 镜像已导出: {output_tar} ({output_tar.stat().st_size/1024/1024:.1f} MB)")
 
