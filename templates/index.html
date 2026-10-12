@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Docker Pack Web — 可视化 Docker 打包工具</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: #0f1420; color: #d4d4d4;
+    min-height: 100vh; display: flex; justify-content: center; padding: 30px 16px;
+  }
+  .container { width: 100%; max-width: 860px; }
+  .banner { text-align: center; padding: 14px; margin-bottom: 18px;
+    border: 1px solid #2a6e2a; border-radius: 10px; background: #0d1f0d; }
+  .banner .title { color: #4ee44e; font-size: 20px; font-weight: bold; }
+  .banner .sub { color: #9fd79f; font-size: 13px; margin-top: 6px; }
+  .card { background: #171d2b; border: 1px solid #2a3247; border-radius: 10px;
+    padding: 18px; margin-bottom: 16px; }
+  .card h3 { color: #7ab8ff; font-size: 15px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+  label { font-size: 13px; color: #aab; min-width: 70px; }
+  input[type=text], input[type=number], select {
+    flex: 1; min-width: 140px; padding: 8px 10px; background: #0d1220;
+    border: 1px solid #333d55; border-radius: 6px; color: #e8e8e8; font-size: 14px;
+  }
+  input:focus { outline: none; border-color: #4e8cff; }
+  .radio-row { display: flex; gap: 16px; margin-bottom: 10px; }
+  .radio-row label { min-width: auto; cursor: pointer; font-size: 14px; }
+  .checks { display: flex; gap: 14px; flex-wrap: wrap; }
+  .checks label { min-width: auto; cursor: pointer; font-size: 14px; color: #c8d0e0; }
+  .btn { padding: 9px 18px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 14px; font-weight: bold; }
+  .btn-primary { background: #2e9e4f; color: #fff; }
+  .btn-primary:hover { background: #37b75c; }
+  .btn-primary:disabled { background: #3a5a44; cursor: not-allowed; }
+  .btn-blue { background: #3a6fd8; color: #fff; }
+  .btn-blue:hover { background: #4a80e8; }
+  .btn-blue:disabled { background: #33456e; cursor: not-allowed; }
+  .progress-wrap { margin: 8px 0; }
+  .progress-bar { height: 10px; background: #0d1220; border-radius: 5px; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2e9e4f, #4ee44e); transition: width .3s; }
+  .eta-text { font-size: 12px; color: #8fd48f; margin-top: 6px; }
+  #log { background: #0d1220; border: 1px solid #2a3247; border-radius: 8px;
+    height: 320px; overflow-y: auto; padding: 10px; font-family: Consolas, monospace;
+    font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  #log .green { color: #4ee44e; font-weight: bold; }
+  .status { font-size: 13px; margin-top: 8px; }
+  .status.running { color: #ffb84e; }
+  .status.done { color: #4ee44e; }
+  .status.error { color: #ff5e5e; }
+  .footer { text-align: center; font-size: 12px; color: #667; margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="banner">
+    <div class="title">🐳 Docker Pack Web — 可视化 Docker 打包工具</div>
+    <div class="sub">作者: y50008 ｜ 来源: www.52pojie.com ｜ 开源: github.com/y50008/docker-pack</div>
+  </div>
+
+  <div class="card">
+    <h3>① 源码来源</h3>
+    <div class="radio-row">
+      <label><input type="radio" name="src_mode" value="local" checked> 本地服务器目录</label>
+      <label><input type="radio" name="src_mode" value="git"> 项目地址（GitHub 或其他）</label>
+    </div>
+    <div class="row" id="local_row">
+      <label>目录路径</label>
+      <input type="text" id="local_path" placeholder="服务器上的项目绝对路径，例如 /data/projects/my-app">
+    </div>
+    <div class="row" id="git_row" style="display:none">
+      <label>项目地址</label>
+      <input type="text" id="git_url" placeholder="https://github.com/user/repo.git">
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>② 镜像配置</h3>
+    <div class="row">
+      <label>镜像名</label>
+      <input type="text" id="img_name" value="my-app">
+      <label style="min-width:40px">标签</label>
+      <input type="text" id="img_tag" value="latest" style="max-width:110px">
+      <label style="min-width:70px">暴露端口</label>
+      <input type="number" id="img_port" value="8080" style="max-width:100px">
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>③ 目标架构（可多选）</h3>
+    <div class="checks">
+      <label><input type="checkbox" class="arch" value="linux/amd64" checked> amd64（x86_64 服务器）</label>
+      <label><input type="checkbox" class="arch" value="linux/arm64"> arm64（ARM 服务器/M 系列）</label>
+      <label><input type="checkbox" class="arch" value="linux/arm/v7"> arm/v7（树莓派 3/4）</label>
+      <label><input type="checkbox" class="arch" value="linux/riscv64"> riscv64（RISC-V）</label>
+    </div>
+  </div>
+
+  <div class="row">
+    <button class="btn btn-primary" id="btn_build" onclick="startBuild()">开始打包</button>
+    <button class="btn btn-blue" id="btn_download" disabled onclick="downloadTar()">下载镜像文件 (.tar)</button>
+    <span class="status" id="status">就绪</span>
+  </div>
+
+  <div class="card">
+    <h3>④ 构建日志与进度</h3>
+    <div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" id="progress_fill"></div></div>
+      <div class="eta-text" id="eta"></div>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div class="footer">Docker Pack Web v1.0 ｜ 需要 Docker 与 docker.sock 权限 ｜ 仅供学习交流</div>
+</div>
+
+<script>
+let currentJob = null;
+let pollTimer = null;
+let startTime = 0;
+
+function getSelectedPlatforms() {
+  return Array.from(document.querySelectorAll('.arch:checked')).map(c => c.value);
+}
+
+function logLine(text, cls) {
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = text;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+}
+
+function setStatus(text, cls) {
+  const s = document.getElementById('status');
+  s.textContent = text;
+  s.className = 'status ' + (cls || '');
+}
+
+async function startBuild() {
+  const srcMode = document.querySelector('input[name=src_mode]:checked').value;
+  const payload = {
+    source_type: srcMode,
+    path: document.getElementById('local_path').value.trim(),
+    url: document.getElementById('git_url').value.trim(),
+    name: document.getElementById('img_name').value.trim(),
+    tag: document.getElementById('img_tag').value.trim(),
+    port: document.getElementById('img_port').value,
+    platforms: getSelectedPlatforms()
+  };
+  if (srcMode === 'local' && !payload.path) { alert('请输入服务器上的项目目录路径'); return; }
+  if (srcMode === 'git' && !payload.url) { alert('请输入项目地址'); return; }
+
+  document.getElementById('btn_build').disabled = true;
+  document.getElementById('btn_download').disabled = true;
+  clearLog();
+  logLine('作者: y50008   来源: www.52pojie.com', 'green');
+  logLine('开源地址: https://github.com/y50008/docker-pack', 'green');
+  logLine('-' .repeat(60), 'green');
+  setStatus('提交任务...', 'running');
+  startTime = Date.now();
+
+  try {
+    const resp = await fetch('/api/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    currentJob = data.job_id;
+    pollTimer = setInterval(pollStatus, 1000);
+  } catch (e) {
+    setStatus('提交失败: ' + e.message, 'error');
+    document.getElementById('btn_build').disabled = false;
+  }
+}
+
+async function pollStatus() {
+  if (!currentJob) return;
+  const resp = await fetch('/api/status/' + currentJob);
+  const data = await resp.json();
+  if (data.error) { stopPoll(); setStatus('任务不存在', 'error'); return; }
+
+  // 追加新日志（简单处理：只追加末尾，日志数组每次全量返回最后200行）
+  const logEl = document.getElementById('log');
+  // 简化：直接重绘日志区（避免重复），日志量大时性能可接受
+  const prevHeight = logEl.scrollHeight;
+  logEl.innerHTML = '';
+  data.logs.forEach(l => {
+    const div = document.createElement('div');
+    if (l.includes('作者: y50008') || l.includes('开源地址')) div.className = 'green';
+    div.textContent = l;
+    logEl.appendChild(div);
+  });
+  logEl.scrollTop = logEl.scrollHeight;
+
+  document.getElementById('progress_fill').style.width = (data.progress * 100) + '%';
+  const elapsed = Math.floor((Date.now() - startTime) / 1000);
+  let etaText = '已用时 ' + elapsed + 's';
+  if (data.progress > 0.02) {
+    const etaSec = Math.floor(elapsed / data.progress - elapsed);
+    if (etaSec > 0) etaText += ' ｜ 预计剩余 ' + Math.floor(etaSec / 60) + '分' + (etaSec % 60) + '秒';
+    else etaText += ' ｜ 即将完成...';
+  }
+  document.getElementById('eta').textContent = etaText + ' ｜ ' + data.message;
+
+  if (data.status === 'done') {
+    stopPoll();
+    document.getElementById('btn_build').disabled = false;
+    document.getElementById('btn_download').disabled = false;
+    setStatus('✓ 构建完成，可下载', 'done');
+  } else if (data.status === 'error') {
+    stopPoll();
+    document.getElementById('btn_build').disabled = false;
+    setStatus('✗ 构建失败', 'error');
+  }
+}
+
+function stopPoll() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function downloadTar() {
+  if (!currentJob) return;
+  window.location.href = '/api/download/' + currentJob;
+}
+
+// 切换来源模式
+document.querySelectorAll('input[name=src_mode]').forEach(r => {
+  r.addEventListener('change', () => {
+    const mode = document.querySelector('input[name=src_mode]:checked').value;
+    document.getElementById('local_row').style.display = mode === 'local' ? '' : 'none';
+    document.getElementById('git_row').style.display = mode === 'git' ? '' : 'none';
+  });
+});
+</script>
+</body>
+</html>

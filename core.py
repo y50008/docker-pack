@@ -8,6 +8,7 @@ core.py — Docker 打包核心逻辑
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -31,6 +32,11 @@ class ProjectType:
     FLUTTER = "flutter"
     STATIC = "static"
     CUSTOM = "custom-dockerfile"   # 项目自带 Dockerfile
+    # 专项框架
+    NEXTJS = "nextjs"
+    DJANGO = "django"
+    FASTAPI = "fastapi"
+    SPRING_BOOT = "spring-boot"
     UNKNOWN = "unknown"
 
 
@@ -211,6 +217,86 @@ COPY . /usr/share/nginx/html/
 EXPOSE {port}
 CMD ["nginx", "-g", "daemon off;"]
 """,
+    # ---------- 专项框架模板 ----------
+    ProjectType.NEXTJS: """\
+# Next.js（SSR 模式）专项模板
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm config set registry https://registry.npmmirror.com \\
+ && (npm ci || npm install)
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/package*.json ./
+RUN npm config set registry https://registry.npmmirror.com \\
+ && npm ci --only=production \\
+ && npm cache clean --force
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/next.config.* ./
+EXPOSE {port}
+CMD ["npm", "start"]
+""",
+    ProjectType.DJANGO: """\
+# Django 专项模板（migrate + collectstatic + gunicorn）
+FROM python:3.11-slim AS builder
+WORKDIR /app
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+
+FROM python:3.11-slim AS runner
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+COPY --from=builder /wheels /wheels
+COPY requirements.txt .
+RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \\
+ && rm -rf /wheels
+COPY . .
+EXPOSE {port}
+CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py collectstatic --noinput 2>/dev/null; gunicorn {wsgi_module}:application -b 0.0.0.0:{port} -w 4 --timeout 120"]
+""",
+    ProjectType.FASTAPI: """\
+# FastAPI 专项模板（uvicorn 多 worker）
+FROM python:3.11-slim AS builder
+WORKDIR /app
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+
+FROM python:3.11-slim AS runner
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+COPY --from=builder /wheels /wheels
+COPY requirements.txt .
+RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \\
+ && rm -rf /wheels
+COPY . .
+EXPOSE {port}
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "{port}", "--workers", "4"]
+""",
+    ProjectType.SPRING_BOOT: """\
+# Spring Boot 专项模板（分层构建，利用 spring-boot layertools 加速依赖缓存）
+FROM maven:3.9-eclipse-temurin-21 AS builder
+WORKDIR /app
+COPY pom.xml .
+RUN mvn dependency:go-offline -B -DskipTests
+COPY src ./src
+RUN mvn package -B -DskipTests
+
+FROM eclipse-temurin:21-jre-alpine AS runner
+WORKDIR /app
+RUN addgroup -S spring && adduser -S spring -G spring
+COPY --from=builder /app/target/*.jar app.jar
+USER spring
+EXPOSE {port}
+ENTRYPOINT ["java", "-jar", "app.jar"]
+""",
 }
 
 DOCKERIGNORE = """\
@@ -231,7 +317,6 @@ __pycache__
 .venv
 venv
 vendor
-.git
 .gradle
 *.iml
 *.log
@@ -241,24 +326,53 @@ tmp
 .env.*
 docker-compose.yml
 docker-compose.yaml
+.next
+staticfiles
+.elasticbeanstalk
+.DS_Store
 """
 
 
 # ---------- 检测 ----------
 
+def _read_text(path: Path, limit: int = 20000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")[:limit]
+    except Exception:
+        return ""
+
+
 def detect_project_type(root: Path) -> str:
     # 优先级 1：项目自带 Dockerfile —— 直接尊重，不覆盖
     if (root / "Dockerfile").exists():
         return ProjectType.CUSTOM
-    if (root / "docker-compose.yml").exists() or (root / "docker-compose.yaml").exists():
-        # 有 compose 但没 Dockerfile，仍按源码类型识别
-        pass
+
+    # Next.js（必须在 package.json 之前判断）
+    if list(root.glob("next.config.*")):
+        return ProjectType.NEXTJS
+
+    # Django（必须在普通 Python 之前判断）
+    if (root / "manage.py").exists():
+        return ProjectType.DJANGO
+
+    # Spring Boot（读取 pom.xml 内容判断，在普通 Maven 之前）
+    if (root / "pom.xml").exists():
+        pom = _read_text(root / "pom.xml")
+        if "spring-boot" in pom:
+            return ProjectType.SPRING_BOOT
+        return ProjectType.MAVEN
+
+    if any((root / f).exists() for f in ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"]):
+        # FastAPI 专项：requirements 含 fastapi/uvicorn 且有 main.py
+        req_text = ""
+        if (root / "requirements.txt").exists():
+            req_text = _read_text(root / "requirements.txt")
+        if ("fastapi" in req_text or "uvicorn" in req_text) and (root / "main.py").exists():
+            return ProjectType.FASTAPI
+        return ProjectType.PYTHON
+
     if (root / "package.json").exists():
         return ProjectType.NODE
-    if any((root / f).exists() for f in ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"]):
-        return ProjectType.PYTHON
-    if (root / "pom.xml").exists():
-        return ProjectType.MAVEN
     if any((root / f).exists() for f in ["build.gradle", "build.gradle.kts", "settings.gradle"]):
         return ProjectType.GRADLE
     if (root / "go.mod").exists():
@@ -313,9 +427,25 @@ def prepare_dockerfile(root: Path, ptype: str, port: int, log: Optional[Callable
 
     tpl = DOCKERFILES.get(ptype)
     if tpl:
-        content = tpl.format(port=port)
+        # wsgi_module 先保留占位，Django 类型随后单独解析替换
+        content = tpl.format(port=port, wsgi_module="{wsgi_module}")
     else:
         content = f"FROM alpine:3.19\nWORKDIR /app\nCOPY . .\nEXPOSE {port}\nCMD [\"sh\"]\n"
+
+    # Django 专项：解析 wsgi 模块名（xxx/wsgi.py → xxx.wsgi）
+    if ptype == ProjectType.DJANGO:
+        wsgi_module = None
+        for p in root.rglob("wsgi.py"):
+            rel = p.relative_to(root)
+            parts = list(rel.parts)[:-1]  # 去掉 wsgi.py
+            if parts:
+                wsgi_module = ".".join(parts) + ".wsgi"
+                break
+        if not wsgi_module:
+            wsgi_module = "project.wsgi"
+            if log:
+                log(f"[warn] 未找到 wsgi.py，Django CMD 将使用占位模块名 {wsgi_module}，请手动修改")
+        content = content.replace("{wsgi_module}", wsgi_module)
 
     start_file, is_dist = detect_start_file(root, ptype)
     if start_file:
@@ -417,8 +547,78 @@ def build_and_export(
         )
         if rc.returncode != 0:
             raise RuntimeError(f"docker save 失败: {rc.stdout}")
+        # 单架构镜像已进入本地仓库，可以做运行自检
+        _self_check(full_tag, port, log)
 
     log(f"[done] 镜像已导出: {output_tar} ({output_tar.stat().st_size/1024/1024:.1f} MB)")
+
+
+def _self_check(image_tag: str, port: int, log: Callable[[str], None]) -> None:
+    """
+    构建后自检：docker run 启动容器，探测端口是否可达，最后自动清理。
+    任何失败都不影响产物导出，只打日志提醒。
+    """
+    import random
+    container = f"packcheck_{os.getpid()}_{int(time.time())}"
+    log(f"[check] 自检：启动容器 {container} 验证镜像可运行...")
+    rc = subprocess.run(
+        ["docker", "run", "-d", "--name", container, "-p", f"127.0.0.1::{port}", image_tag],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    if rc.returncode != 0:
+        log(f"[check] ⚠ 容器启动失败（{rc.stdout.strip()}），跳过自检，不影响产物")
+        return
+
+    # 查询实际映射的宿主机端口
+    host_port = None
+    out = subprocess.run(
+        ["docker", "port", container],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    m = re.search(r"127\.0\.0\.1:(\d+)", out.stdout)
+    if m:
+        host_port = int(m.group(1))
+
+    # 轮询最多 30 秒：容器存活 + 端口可达
+    alive = False
+    reachable = False
+    last_logs = ""
+    for _ in range(15):
+        time.sleep(2)
+        insp = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", container],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        alive = insp.stdout.strip() == "true"
+        if not alive:
+            logs = subprocess.run(
+                ["docker", "logs", "--tail", "25", container],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            ).stdout
+            last_logs = logs[-1200:]
+            break
+        if host_port:
+            try:
+                with socket.create_connection(("127.0.0.1", host_port), timeout=2):
+                    reachable = True
+                    break
+            except OSError:
+                pass
+
+    if reachable:
+        log(f"[check] ✓ 自检通过：容器正常运行，端口 {host_port} 可访问")
+    elif alive:
+        log(f"[check] △ 容器存活但端口 {host_port or port} 暂不可达（服务可能启动较慢），请以实际运行为准")
+    else:
+        log(f"[check] ✗ 自检失败：容器提前退出，最近日志：\n{last_logs}")
+
+    subprocess.run(["docker", "rm", "-f", container],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log(f"[check] 自检容器已清理")
 
 
 def _run_streaming(

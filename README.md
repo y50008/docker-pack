@@ -6,7 +6,7 @@
 
 作者：y50008 ｜ 来源：www.52pojie.com ｜ 开源地址：https://github.com/y50008/docker-pack
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-yellow)
 ![Docker](https://img.shields.io/badge/docker-required-2496ED)
@@ -21,6 +21,8 @@ Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。�
 
 **无需手写 Dockerfile，无需记 docker build 命令，小白也能打出生产级镜像。**
 
+> 🆕 **v1.1 新增**：专项框架模板（Next.js / Django / FastAPI / Spring Boot）、构建后容器自检、**Web 部署版**（浏览器访问，多人共用）。
+
 ![工具界面示意图](docs/screenshot.png)
 
 ---
@@ -29,12 +31,14 @@ Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。�
 
 | 特性 | 说明 |
 |---|---|
-| 🎯 **自动识别项目类型** | 支持 13 种主流语言/框架，无需手动配置 |
+| 🎯 **自动识别项目类型** | 支持 17 种语言/框架（含 4 个专项框架模板），无需手动配置 |
 | 🎨 **可视化界面** | 原生 Windows GUI，双击 exe 即用，无需安装 Python |
 | 🌐 **支持 Git 仓库** | 直接输入 GitHub/Gitee 地址，自动 clone 后打包 |
 | 🏗️ **多架构构建** | 支持 amd64 / arm64 / armv7 / riscv64 任意组合 |
 | ⏱️ **实时进度** | 进度条 + 已用时 + 预计剩余时间 + 实时日志 |
 | 📦 **一键导出 tar** | 构建完成后点下载，选择保存位置即可 |
+| 🩺 **构建后自检** | 打包完自动运行容器 + 探测端口，验证镜像真能跑 |
+| 🌍 **Web 部署版** | 工具本身可 Docker 化部署，浏览器操作、多人共用 |
 | 🇨🇳 **国内镜像源** | npm / pip / Go proxy 默认切国内源，构建更快 |
 | 📦 **多阶段构建** | 自动生成精简镜像，体积最小化 |
 
@@ -64,10 +68,21 @@ Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。�
 
 ## 🗂️ 支持的项目类型
 
+### 专项框架模板（v1.1 新增）
+
+| 标志文件 | 识别为 | 专项优化 |
+|---|---|---|
+| `next.config.*` | **Next.js** | SSR 模式：`.next` 产物 + `npm start`，非静态导出 |
+| `manage.py` | **Django** | 自动 migrate + collectstatic + gunicorn 4 worker，自动解析 wsgi 模块 |
+| `requirements.txt` 含 fastapi/uvicorn + `main.py` | **FastAPI** | uvicorn 4 worker 启动 |
+| `pom.xml` 含 spring-boot | **Spring Boot** | 非 root 用户运行 + JRE 21，更安全 |
+
+### 通用类型
+
 | 标志文件 | 识别为 | 基础镜像策略 |
 |---|---|---|
 | `Dockerfile`（已有） | 项目自带 Dockerfile | **直接复用，不覆盖** |
-| `package.json` | Node.js（含 TS/React/Vue/Next） | node:20-alpine 多阶段 |
+| `package.json` | Node.js（含 TS/React/Vue） | node:20-alpine 多阶段 |
 | `requirements.txt` / `pyproject.toml` | Python | python:3.11-slim 多阶段 |
 | `pom.xml` | Java Maven | maven:3.9 + JRE 21 |
 | `build.gradle` | Java Gradle / Spring Boot | gradle:8 + JRE 21 |
@@ -81,6 +96,43 @@ Docker Pack GUI 是一款 **Windows 桌面端**的 Docker 镜像打包工具。�
 | `index.html`（兜底） | 静态网站 | nginx:alpine |
 
 > 💡 **智能兼容**：如果项目根目录已经有 Dockerfile，工具会直接使用它，不会覆盖你写好的配置。
+
+---
+
+## 🩺 构建后自检（v1.1 新增）
+
+单架构构建完成后，工具会自动：
+
+1. `docker run` 启动刚构建的镜像
+2. 轮询 30 秒，检查容器是否存活
+3. 探测映射端口是否可访问
+4. 自动清理测试容器（不留垃圾）
+
+结果在日志中显示为 `✓ 自检通过` / `△ 容器存活但端口暂不可达` / `✗ 容器提前退出（附最近日志）`。**自检失败不影响 tar 导出**，只提醒你镜像可能有问题。
+
+---
+
+## 🌍 Web 部署版（v1.1 新增）
+
+工具本身可以 Docker 化部署，浏览器访问、多人共用：
+
+```bash
+cd docker-pack-gui/web
+docker build -t docker-pack-web .
+docker run -d -p 8000:8000 \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v /data/docker-pack-web:/data \
+    docker-pack-web
+```
+
+然后浏览器访问 `http://服务器IP:8000`，功能和 exe 版一致（选目录/输仓库地址、选架构、实时日志、下载 tar）。
+
+**本地开发运行 Web 版**（需 Python 3.10+）：
+
+```bash
+pip install flask
+python web_app.py          # 默认端口 8000
+```
 
 ---
 
@@ -144,8 +196,16 @@ pyinstaller --onefile --windowed --name DockerPack pack_gui.py
 
 ```
 docker-pack-gui/
-├── pack_gui.py      # tkinter GUI 主程序
-├── core.py          # 核心逻辑：项目检测、Dockerfile 生成、git clone、docker build/save
+├── pack_gui.py      # tkinter GUI 主程序（exe 版界面）
+├── core.py          # 核心逻辑：项目检测、Dockerfile 生成、git clone、docker build/save、构建后自检
+├── web_app.py       # Web 版后端（Flask API，复用 core.py）
+├── templates/
+│   └── index.html   # Web 版前端页面
+├── web/
+│   ├── Dockerfile   # Web 版自身镜像（部署用）
+│   └── requirements.txt
+├── docs/
+│   └── screenshot.png   # 界面示意图
 ├── README.md        # 本文件
 ├── .gitignore
 └── dist/
