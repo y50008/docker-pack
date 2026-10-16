@@ -6,6 +6,7 @@ test_p0_fixes.py 的全部检查，并新增 v1.4 功能的校验：
 输入校验、错误中文化、自定义模板覆盖、产物自动清理。
 """
 import os
+import shutil
 
 import pytest
 
@@ -200,11 +201,15 @@ def test_build_copy_zero_pollution(tmp_path):
     mkproj(src, **{"index.js": "console.log(1)", ".dockerignore": "my-custom-rule",
                    "package.json": "{}"})
     bd = core._make_build_copy(src)
-    core.prepare_dockerfile(bd, core.detect_project_type(bd), 8080)
-    assert not (src / "Dockerfile").exists()
-    assert (src / ".dockerignore").read_text(encoding="utf-8") == "my-custom-rule"
-    assert (bd / ".dockerignore").read_text(encoding="utf-8") == "my-custom-rule"
-    assert (bd / "Dockerfile").exists()
+    try:
+        core.prepare_dockerfile(bd, core.detect_project_type(bd), 8080)
+        assert not (src / "Dockerfile").exists()
+        assert (src / ".dockerignore").read_text(encoding="utf-8") == "my-custom-rule"
+        assert (bd / ".dockerignore").read_text(encoding="utf-8") == "my-custom-rule"
+        assert (bd / "Dockerfile").exists()
+    finally:
+        # 清理 _make_build_copy 在系统临时目录创建的构建副本，避免测试残留
+        shutil.rmtree(bd, ignore_errors=True)
 
 
 # ---------- 四、compose 生成 ----------
