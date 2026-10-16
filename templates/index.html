@@ -21,15 +21,17 @@
   .card h3 { color: #7ab8ff; font-size: 15px; margin-bottom: 12px; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
   label { font-size: 13px; color: #aab; min-width: 70px; }
-  input[type=text], input[type=number], select {
+  input[type=text], input[type=number], input[type=password], select, textarea {
     flex: 1; min-width: 140px; padding: 8px 10px; background: #0d1220;
     border: 1px solid #333d55; border-radius: 6px; color: #e8e8e8; font-size: 14px;
   }
-  input:focus { outline: none; border-color: #4e8cff; }
+  textarea { min-width: 100%; font-family: Consolas, monospace; font-size: 12px; resize: vertical; }
+  input:focus, textarea:focus { outline: none; border-color: #4e8cff; }
   .radio-row { display: flex; gap: 16px; margin-bottom: 10px; }
   .radio-row label { min-width: auto; cursor: pointer; font-size: 14px; }
-  .checks { display: flex; gap: 14px; flex-wrap: wrap; }
+  .checks { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 10px; }
   .checks label { min-width: auto; cursor: pointer; font-size: 14px; color: #c8d0e0; }
+  .hint { font-size: 12px; color: #778; margin-bottom: 8px; }
   .btn { padding: 9px 18px; border: none; border-radius: 6px; cursor: pointer;
     font-size: 14px; font-weight: bold; }
   .btn-primary { background: #2e9e4f; color: #fff; }
@@ -38,6 +40,12 @@
   .btn-blue { background: #3a6fd8; color: #fff; }
   .btn-blue:hover { background: #4a80e8; }
   .btn-blue:disabled { background: #33456e; cursor: not-allowed; }
+  .btn-gray { background: #5a6378; color: #fff; }
+  .btn-gray:hover { background: #6a7388; }
+  .btn-gray:disabled { background: #3a4255; cursor: not-allowed; }
+  .btn-orange { background: #c47a1f; color: #fff; }
+  .btn-orange:hover { background: #d88a2a; }
+  .btn-orange:disabled { background: #5a4530; cursor: not-allowed; }
   .progress-wrap { margin: 8px 0; }
   .progress-bar { height: 10px; background: #0d1220; border-radius: 5px; overflow: hidden; }
   .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2e9e4f, #4ee44e); transition: width .3s; }
@@ -50,7 +58,10 @@
   .status.running { color: #ffb84e; }
   .status.done { color: #4ee44e; }
   .status.error { color: #ff5e5e; }
+  .status.cancelled { color: #9aa3b5; }
   .footer { text-align: center; font-size: 12px; color: #667; margin-top: 16px; }
+  .token-row { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; }
+  .token-row input { max-width: 360px; }
 </style>
 </head>
 <body>
@@ -61,18 +72,41 @@
   </div>
 
   <div class="card">
+    <h3>访问令牌</h3>
+    <div class="token-row">
+      <label style="min-width:80px">令牌</label>
+      <input type="password" id="token" placeholder="若服务器设置了 DPW_TOKEN 请填写（保存在本浏览器 localStorage）">
+      <button class="btn btn-gray" onclick="saveToken()">保存令牌</button>
+      <span class="hint" id="token_status" style="margin:0"></span>
+    </div>
+  </div>
+
+  <div class="card">
     <h3>① 源码来源</h3>
     <div class="radio-row">
-      <label><input type="radio" name="src_mode" value="local" checked> 本地服务器目录</label>
+      <label><input type="radio" name="src_mode" value="local" checked> 服务器目录 / 上传 zip</label>
       <label><input type="radio" name="src_mode" value="git"> 项目地址（GitHub 或其他）</label>
     </div>
     <div class="row" id="local_row">
       <label>目录路径</label>
-      <input type="text" id="local_path" placeholder="服务器上的项目绝对路径，例如 /data/projects/my-app">
+      <input type="text" id="local_path" placeholder="zip 上传解压后自动填入；默认仅允许服务器产物目录内路径">
+    </div>
+    <div class="row" id="upload_row">
+      <label style="min-width:80px">上传 zip</label>
+      <input type="file" id="zip_file" accept=".zip" style="flex:2;min-width:180px">
+      <button class="btn btn-blue" onclick="uploadZip()">上传并解压</button>
     </div>
     <div class="row" id="git_row" style="display:none">
       <label>项目地址</label>
       <input type="text" id="git_url" placeholder="https://github.com/user/repo.git">
+    </div>
+    <div class="row" id="branch_row" style="display:none">
+      <label style="min-width:80px">分支/标签</label>
+      <input type="text" id="git_branch" placeholder="可选，例如 main / v1.2.0">
+    </div>
+    <div class="row">
+      <label style="min-width:80px">子目录</label>
+      <input type="text" id="subdir" placeholder="可选，monorepo 项目相对源码根目录的子目录">
     </div>
   </div>
 
@@ -98,14 +132,39 @@
     </div>
   </div>
 
+  <div class="card">
+    <h3>④ 部署选项（可选）</h3>
+    <div class="checks">
+      <label><input type="checkbox" id="opt_compose"> 生成 docker-compose.yml</label>
+      <label><input type="checkbox" id="opt_mysql"> 附带 MySQL</label>
+      <label><input type="checkbox" id="opt_redis"> 附带 Redis</label>
+      <label><input type="checkbox" id="opt_push"> 构建后推送镜像</label>
+      <label><input type="checkbox" id="opt_compress"> 压缩为 .tar.gz</label>
+    </div>
+    <div class="row">
+      <label style="min-width:90px">数据库密码</label>
+      <input type="password" id="db_pass" value="change-me" style="max-width:240px">
+    </div>
+    <div class="row">
+      <label style="min-width:90px">仓库地址</label>
+      <input type="text" id="registry" placeholder="registry.cn-hangzhou.aliyuncs.com/your-namespace">
+    </div>
+    <div class="row" style="display:block">
+      <label style="display:block;margin-bottom:6px">构建参数（每行一个 KEY=VALUE）</label>
+      <textarea id="build_args" rows="3" placeholder="VERSION=1.0.0&#10;NODE_ENV=production"></textarea>
+    </div>
+  </div>
+
   <div class="row">
     <button class="btn btn-primary" id="btn_build" onclick="startBuild()">开始打包</button>
-    <button class="btn btn-blue" id="btn_download" disabled onclick="downloadTar()">下载镜像文件 (.tar)</button>
+    <button class="btn btn-orange" id="btn_cancel" disabled onclick="cancelBuild()">取消构建</button>
+    <button class="btn btn-blue" id="btn_download" disabled onclick="downloadTar()">下载镜像文件</button>
+    <button class="btn btn-blue" id="btn_compose" disabled onclick="downloadCompose()">下载 compose</button>
     <span class="status" id="status">就绪</span>
   </div>
 
   <div class="card">
-    <h3>④ 构建日志与进度</h3>
+    <h3>⑤ 构建日志与进度</h3>
     <div class="progress-wrap">
       <div class="progress-bar"><div class="progress-fill" id="progress_fill"></div></div>
       <div class="eta-text" id="eta"></div>
@@ -113,13 +172,47 @@
     <div id="log"></div>
   </div>
 
-  <div class="footer">Docker Pack Web v1.0 ｜ 需要 Docker 与 docker.sock 权限 ｜ 仅供学习交流</div>
+  <div class="footer">Docker Pack Web v2 ｜ 需要 Docker 与 docker.sock 权限 ｜ 仅供学习交流</div>
 </div>
 
 <script>
 let currentJob = null;
 let pollTimer = null;
 let startTime = 0;
+
+// ---------- 访问令牌 ----------
+
+function getToken() {
+  return localStorage.getItem('dpw_token') || '';
+}
+
+function saveToken() {
+  const t = document.getElementById('token').value.trim();
+  if (t) {
+    localStorage.setItem('dpw_token', t);
+    document.getElementById('token_status').textContent = '✓ 已保存';
+  } else {
+    localStorage.removeItem('dpw_token');
+    document.getElementById('token_status').textContent = '已清空';
+  }
+}
+
+function authHeaders(extra) {
+  const h = extra || {};
+  const t = getToken();
+  if (t) h['Authorization'] = 'Bearer ' + t;
+  return h;
+}
+
+function loadToken() {
+  const t = getToken();
+  if (t) {
+    document.getElementById('token').value = t;
+    document.getElementById('token_status').textContent = '✓ 已保存';
+  }
+}
+
+// ---------- 工具 ----------
 
 function getSelectedPlatforms() {
   return Array.from(document.querySelectorAll('.arch:checked')).map(c => c.value);
@@ -144,54 +237,139 @@ function setStatus(text, cls) {
   s.className = 'status ' + (cls || '');
 }
 
+function setButtonsRunning(running) {
+  document.getElementById('btn_build').disabled = running;
+  document.getElementById('btn_cancel').disabled = !running;
+}
+
+// ---------- zip 上传 ----------
+
+async function uploadZip() {
+  const fileInput = document.getElementById('zip_file');
+  if (!fileInput.files || !fileInput.files[0]) {
+    alert('请先选择 .zip 文件');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  setStatus('上传并解压中...', 'running');
+  try {
+    const resp = await fetch('/api/upload', { method: 'POST', headers: authHeaders({}), body: fd });
+    const data = await resp.json();
+    if (resp.status === 401) {
+      alert('访问令牌无效或缺失，请在页面顶部填写并保存令牌');
+      setStatus('未授权', 'error');
+      return;
+    }
+    if (!resp.ok) {
+      alert('上传失败：' + (data.error || resp.status));
+      setStatus('上传失败', 'error');
+      return;
+    }
+    document.getElementById('local_path').value = data.path;
+    setStatus('zip 已解压，路径已填入', 'done');
+    logLine('[upload] zip 已解压到：' + data.path);
+  } catch (e) {
+    alert('上传失败：' + e.message);
+    setStatus('上传失败', 'error');
+  }
+}
+
+// ---------- 构建 ----------
+
 async function startBuild() {
   const srcMode = document.querySelector('input[name=src_mode]:checked').value;
   const payload = {
     source_type: srcMode,
     path: document.getElementById('local_path').value.trim(),
     url: document.getElementById('git_url').value.trim(),
+    branch: document.getElementById('git_branch').value.trim(),
+    subdir: document.getElementById('subdir').value.trim(),
     name: document.getElementById('img_name').value.trim(),
     tag: document.getElementById('img_tag').value.trim(),
     port: document.getElementById('img_port').value,
-    platforms: getSelectedPlatforms()
+    platforms: getSelectedPlatforms(),
+    gen_compose: document.getElementById('opt_compose').checked,
+    compose_mysql: document.getElementById('opt_mysql').checked,
+    compose_redis: document.getElementById('opt_redis').checked,
+    db_password: document.getElementById('db_pass').value,
+    push: document.getElementById('opt_push').checked,
+    registry: document.getElementById('registry').value.trim(),
+    build_args: document.getElementById('build_args').value,
+    compress: document.getElementById('opt_compress').checked
   };
-  if (srcMode === 'local' && !payload.path) { alert('请输入服务器上的项目目录路径'); return; }
+  if (srcMode === 'local' && !payload.path) { alert('请输入服务器目录路径，或先上传 zip 并解压'); return; }
   if (srcMode === 'git' && !payload.url) { alert('请输入项目地址'); return; }
+  if (payload.platforms.length === 0) { alert('请至少选择一个目标架构'); return; }
 
-  document.getElementById('btn_build').disabled = true;
+  setButtonsRunning(true);
   document.getElementById('btn_download').disabled = true;
+  document.getElementById('btn_compose').disabled = true;
   clearLog();
   logLine('作者: y50008', 'green');
   logLine('开源地址: https://github.com/y50008/docker-pack', 'green');
-  logLine('-' .repeat(60), 'green');
+  logLine('-'.repeat(60), 'green');
   setStatus('提交任务...', 'running');
   startTime = Date.now();
 
   try {
     const resp = await fetch('/api/build', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload)
     });
     const data = await resp.json();
+    if (resp.status === 401) {
+      alert('访问令牌无效或缺失，请在页面顶部填写并保存令牌');
+      setButtonsRunning(false);
+      setStatus('未授权', 'error');
+      return;
+    }
+    if (!resp.ok) {
+      alert('提交失败：' + (data.error || resp.status));
+      setButtonsRunning(false);
+      setStatus('提交失败', 'error');
+      return;
+    }
     currentJob = data.job_id;
     pollTimer = setInterval(pollStatus, 1000);
   } catch (e) {
     setStatus('提交失败: ' + e.message, 'error');
-    document.getElementById('btn_build').disabled = false;
+    setButtonsRunning(false);
+  }
+}
+
+async function cancelBuild() {
+  if (!currentJob) return;
+  document.getElementById('btn_cancel').disabled = true;
+  setStatus('正在取消...', 'running');
+  try {
+    await fetch('/api/cancel/' + currentJob, { method: 'POST', headers: authHeaders({}) });
+  } catch (e) {
+    logLine('[cancel] 取消请求失败：' + e.message);
   }
 }
 
 async function pollStatus() {
   if (!currentJob) return;
-  const resp = await fetch('/api/status/' + currentJob);
+  let resp;
+  try {
+    resp = await fetch('/api/status/' + currentJob, { headers: authHeaders({}) });
+  } catch (e) {
+    return;
+  }
+  if (resp.status === 401) {
+    stopPoll();
+    alert('访问令牌无效或缺失，请在页面顶部填写并保存令牌');
+    setButtonsRunning(false);
+    setStatus('未授权', 'error');
+    return;
+  }
   const data = await resp.json();
-  if (data.error) { stopPoll(); setStatus('任务不存在', 'error'); return; }
+  if (data.error) { stopPoll(); setStatus('任务不存在', 'error'); setButtonsRunning(false); return; }
 
-  // 追加新日志（简单处理：只追加末尾，日志数组每次全量返回最后200行）
+  // 全量重绘日志区（服务端返回最近 200 行）
   const logEl = document.getElementById('log');
-  // 简化：直接重绘日志区（避免重复），日志量大时性能可接受
-  const prevHeight = logEl.scrollHeight;
   logEl.innerHTML = '';
   data.logs.forEach(l => {
     const div = document.createElement('div');
@@ -213,13 +391,18 @@ async function pollStatus() {
 
   if (data.status === 'done') {
     stopPoll();
-    document.getElementById('btn_build').disabled = false;
+    setButtonsRunning(false);
     document.getElementById('btn_download').disabled = false;
+    if (data.has_compose) document.getElementById('btn_compose').disabled = false;
     setStatus('✓ 构建完成，可下载', 'done');
   } else if (data.status === 'error') {
     stopPoll();
-    document.getElementById('btn_build').disabled = false;
-    setStatus('✗ 构建失败', 'error');
+    setButtonsRunning(false);
+    setStatus('✗ 构建失败：' + (data.error || ''), 'error');
+  } else if (data.status === 'cancelled') {
+    stopPoll();
+    setButtonsRunning(false);
+    setStatus('已取消', 'cancelled');
   }
 }
 
@@ -227,9 +410,20 @@ function stopPoll() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
+// 下载链接走浏览器跳转，无法带 Authorization 头，用 query 参数携带令牌
+function authQuery() {
+  const t = getToken();
+  return t ? '?token=' + encodeURIComponent(t) : '';
+}
+
 function downloadTar() {
   if (!currentJob) return;
-  window.location.href = '/api/download/' + currentJob;
+  window.location.href = '/api/download/' + currentJob + authQuery();
+}
+
+function downloadCompose() {
+  if (!currentJob) return;
+  window.location.href = '/api/download-compose/' + currentJob + authQuery();
 }
 
 // 切换来源模式
@@ -237,9 +431,13 @@ document.querySelectorAll('input[name=src_mode]').forEach(r => {
   r.addEventListener('change', () => {
     const mode = document.querySelector('input[name=src_mode]:checked').value;
     document.getElementById('local_row').style.display = mode === 'local' ? '' : 'none';
+    document.getElementById('upload_row').style.display = mode === 'local' ? '' : 'none';
     document.getElementById('git_row').style.display = mode === 'git' ? '' : 'none';
+    document.getElementById('branch_row').style.display = mode === 'git' ? '' : 'none';
   });
 });
+
+loadToken();
 </script>
 </body>
 </html>

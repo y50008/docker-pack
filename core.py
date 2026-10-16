@@ -5,12 +5,15 @@ core.py — Docker 打包核心逻辑
 被 GUI 调用，通过回调函数推送日志行和进度。
 """
 
+import gzip
 import os
+import queue
 import re
 import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -63,7 +66,7 @@ ENV NODE_ENV=production
 COPY --from=builder /app/package*.json ./
 RUN --mount=type=cache,target=/root/.npm \\
  npm config set registry https://registry.npmmirror.com \\
- && npm ci --only=production \\
+ && (npm ci --omit=dev || npm install --omit=dev) \\
  && npm cache clean --force
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
@@ -77,7 +80,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \\
  pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \\
- pip wheel --wheel-dir /wheels -r requirements.txt
+ pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
 FROM python:3.11-slim AS runner
 WORKDIR /app
@@ -122,7 +125,7 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 ENV GOPROXY=https://goproxy.cn,direct
-COPY go.mod go.sum ./
+COPY go.* ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \\
@@ -153,7 +156,7 @@ ENTRYPOINT ["dotnet", "app.dll"]
     ProjectType.PHP: """\
 FROM composer:2 AS builder
 WORKDIR /app
-COPY composer.json composer.lock ./
+COPY composer.* ./
 RUN composer install --no-dev --optimize-autoloader --no-interaction
 
 FROM php:8.3-apache AS runner
@@ -167,7 +170,7 @@ EXPOSE {port}
 FROM ruby:3.2-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache build-base
-COPY Gemfile Gemfile.lock ./
+COPY Gemfile* ./
 RUN bundle config set --local frozen false \\
  && bundle install jobs=4 --retry=3
 
@@ -182,8 +185,8 @@ CMD ["ruby", "app.rb"]
 FROM rust:1.77-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache musl-dev
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
+COPY Cargo.* ./
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
 COPY src ./src
 RUN cargo build --release
 
@@ -209,10 +212,10 @@ EXPOSE {port}
 CMD ["./server"]
 """,
     ProjectType.FLUTTER: """\
---========== 说明：Flutter Web/移动产物体积大，需要 Flutter SDK ==========--
+# Flutter Web 专项（需要 Flutter SDK，构建较慢）
 FROM ghcr.io/cirruslabs/flutter:stable AS builder
 WORKDIR /app
-COPY pubspec.yaml pubspec.lock ./
+COPY pubspec.* ./
 RUN flutter pub get
 COPY . .
 RUN flutter build web
@@ -244,7 +247,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=builder /app/package*.json ./
 RUN npm config set registry https://registry.npmmirror.com \\
- && npm ci --only=production \\
+ && (npm ci --omit=dev || npm install --omit=dev) \\
  && npm cache clean --force
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
@@ -321,7 +324,8 @@ RUN npm run build
 
 FROM nginx:alpine AS runner
 COPY --from=builder /app/dist /usr/share/nginx/html
-EXPOSE 80
+RUN printf 'server {\\n  listen {port};\\n  root /usr/share/nginx/html;\\n  location / { try_files $uri $uri/ /index.html; }\\n}\\n' > /etc/nginx/conf.d/default.conf
+EXPOSE {port}
 """,
     ProjectType.DENO: """\
 # Deno 专项（入口自动识别 main.ts / mod.ts / server.ts / index.ts）
@@ -422,6 +426,100 @@ staticfiles
 .elasticbeanstalk
 .DS_Store
 """
+
+
+# ---------- 输入校验 ----------
+
+IMAGE_NAME_RE = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*(\/[a-z0-9]+([._-][a-z0-9]+)*)*$")
+TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
+
+
+def validate_image_name(name: str) -> str:
+    """校验镜像名，返回错误信息（空串表示通过）。"""
+    name = name.strip()
+    if not name:
+        return "镜像名不能为空"
+    if name != name.lower():
+        return "镜像名必须全部小写（Docker 规范），例如 my-app"
+    if not IMAGE_NAME_RE.match(name):
+        return "镜像名只能包含小写字母、数字、. _ - 和 / ，例如 my-app 或 registry.example.com/ns/my-app"
+    return ""
+
+
+def validate_tag(tag: str) -> str:
+    tag = tag.strip()
+    if not tag:
+        return "标签不能为空"
+    if not TAG_RE.match(tag):
+        return "标签只能包含字母、数字、_ . - ，且以字母/数字开头，例如 v1.0 或 latest"
+    return ""
+
+
+def validate_port(port) -> str:
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return "端口必须是数字"
+    if not (1 <= p <= 65535):
+        return "端口必须在 1-65535 之间"
+    return ""
+
+
+def validate_build_args(text: str) -> tuple[dict, str]:
+    """解析 KEY=VALUE 每行一个的构建参数，返回 (参数字典, 错误信息)。"""
+    args: dict[str, str] = {}
+    for i, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            return {}, f"第 {i} 行构建参数格式错误，应为 KEY=VALUE：{line}"
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if not k:
+            return {}, f"第 {i} 行构建参数 KEY 为空"
+        args[k] = v.strip()
+    return args, ""
+
+
+# ---------- 环境体检与错误翻译 ----------
+
+def docker_preflight() -> None:
+    """构建前体检：docker 命令存在 + 守护进程正在运行。"""
+    if shutil.which("docker") is None:
+        raise RuntimeError("未检测到 docker 命令，请先安装并启动 Docker Desktop")
+    rc = subprocess.run(
+        ["docker", "info"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace",
+        timeout=30,
+    )
+    if rc.returncode != 0:
+        raise RuntimeError("Docker 守护进程未响应：请确认 Docker Desktop 已启动（托盘图标显示 running）后再重试")
+
+
+def friendly_error(msg: str) -> str:
+    """把常见 Docker 英文报错翻译成小白能看懂的中文提示。"""
+    hints = [
+        ("error during connect", "无法连接 Docker：请确认 Docker Desktop 已启动"),
+        ("cannot connect to the docker daemon", "无法连接 Docker：请确认 Docker Desktop 已启动"),
+        ("is the docker daemon running", "Docker 守护进程未运行：请启动 Docker Desktop"),
+        ("no space left on device", "磁盘空间不足：请清理 Docker 数据或磁盘后重试"),
+        ("port is already allocated", "端口被占用：请更换端口或停止占用该端口的程序"),
+        ("i/o timeout", "网络超时：拉取基础镜像失败，请检查网络或配置镜像加速器"),
+        ("connection refused", "连接被拒绝：请检查网络或镜像仓库地址是否正确"),
+        ("not found: manifest unknown", "找不到基础镜像：当前架构可能没有该镜像，试试单架构 amd64 构建"),
+        ("denied: requested access to the resource is denied", "推送被拒绝：请先点「登录镜像仓库」完成 docker login"),
+        ("unauthorized: authentication required", "推送被拒绝：请先点「登录镜像仓库」完成 docker login"),
+        ("name unknown", "推送失败：仓库地址或命名空间不存在，请核对仓库地址"),
+        ("failed to solve", "镜像构建失败：请看上方日志中第一个 ERROR 行定位具体原因"),
+        ("dockerfile parse error", "Dockerfile 语法错误：请看上方日志中的行号提示"),
+    ]
+    low = msg.lower()
+    for key, hint in hints:
+        if key in low:
+            return f"{hint}\n\n原始错误：{msg}"
+    return msg
 
 
 # ---------- 检测 ----------
@@ -537,19 +635,60 @@ def detect_start_file(root: Path, ptype: str):
     return None, False
 
 
+def _write_dockerignore(root: Path, log: Optional[Callable[[str], None]] = None) -> None:
+    """只在缺失时写入 .dockerignore，绝不覆盖用户自己的配置。"""
+    p = root / ".dockerignore"
+    if p.exists():
+        if log:
+            log("[detect] 项目已有 .dockerignore，保留不覆盖")
+        return
+    p.write_text(DOCKERIGNORE, encoding="utf-8", newline="\n")
+
+
+def _load_template_override(ptype: str) -> Optional[str]:
+    """加载用户自定义模板：优先环境变量 DOCKER_PACK_TEMPLATES 目录，
+    其次 exe/脚本同级 templates/<ptype>.dockerfile。文件存在时覆盖内置模板。"""
+    import sys
+    candidates = []
+    env_dir = os.environ.get("DOCKER_PACK_TEMPLATES")
+    if env_dir:
+        candidates.append(Path(env_dir) / f"{ptype}.dockerfile")
+    exe_dir = Path(sys.argv[0]).resolve().parent
+    candidates.append(exe_dir / "templates" / f"{ptype}.dockerfile")
+    candidates.append(Path(__file__).resolve().parent / "templates" / f"{ptype}.dockerfile")
+    for p in candidates:
+        try:
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+    return None
+
+
 def prepare_dockerfile(root: Path, ptype: str, port: int, log: Optional[Callable[[str], None]] = None) -> None:
-    """在项目根目录生成 Dockerfile 和 .dockerignore。若项目已有 Dockerfile，则保留不覆盖。"""
-    # 已有 Dockerfile：尊重用户，只补 .dockerignore
+    """在项目目录生成 Dockerfile 和 .dockerignore（调用方应传入构建用的临时副本目录）。
+
+    - 项目已有 Dockerfile：保留不覆盖，只补 .dockerignore
+    - 项目已有 .dockerignore：保留用户自己的，不覆盖
+    - 内置模板可被 templates/<ptype>.dockerfile 自定义模板覆盖（支持 {port} 占位符）
+    """
+    # 已有 Dockerfile：尊重用户
     if ptype == ProjectType.CUSTOM:
         if log:
             log("[detect] 项目自带 Dockerfile，直接复用，不覆盖")
-        (root / ".dockerignore").write_text(DOCKERIGNORE, encoding="utf-8", newline="\n")
+        _write_dockerignore(root, log)
         return
 
-    tpl = DOCKERFILES.get(ptype)
+    override = _load_template_override(ptype)
+    if override is not None:
+        tpl = override
+        if log:
+            log(f"[detect] 使用自定义模板覆盖内置 {ptype} 模板")
+    else:
+        tpl = DOCKERFILES.get(ptype)
     if tpl:
-        # wsgi_module 先保留占位，Django 类型随后单独解析替换
-        content = tpl.format(port=port, wsgi_module="{wsgi_module}")
+        # 用 replace 而非 str.format：模板中可安全出现 {} 花括号（如 Rust 的 fn main() {}）
+        content = tpl.replace("{port}", str(port))
     else:
         content = f"FROM alpine:3.19\nWORKDIR /app\nCOPY . .\nEXPOSE {port}\nCMD [\"sh\"]\n"
 
@@ -568,6 +707,38 @@ def prepare_dockerfile(root: Path, ptype: str, port: int, log: Optional[Callable
                 log(f"[warn] 未找到 wsgi.py，Django CMD 将使用占位模块名 {wsgi_module}，请手动修改")
         content = content.replace("{wsgi_module}", wsgi_module)
 
+    # Python 家族：没有 requirements.txt（pyproject.toml / setup.py / Pipfile 项目）时，
+    # 依赖阶段改为整包构建，避免 COPY requirements.txt 直接失败
+    if ptype in (ProjectType.PYTHON, ProjectType.DJANGO, ProjectType.FASTAPI) \
+            and not (root / "requirements.txt").exists():
+        builder_variants = [
+            ("COPY requirements.txt .\nRUN --mount=type=cache,target=/root/.cache/pip \\\n pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt",
+             "COPY . .\nRUN --mount=type=cache,target=/root/.cache/pip \\\n pip wheel --no-cache-dir --wheel-dir /wheels ."),
+            ("COPY requirements.txt .\nRUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt",
+             "COPY . .\nRUN pip wheel --no-cache-dir --wheel-dir /wheels ."),
+        ]
+        runner_old = ("COPY --from=builder /wheels /wheels\n"
+                      "COPY requirements.txt .\n"
+                      "RUN pip install --no-cache-dir --no-index --find-links=/wheels -r requirements.txt \\\n"
+                      " && rm -rf /wheels\n"
+                      "COPY . .")
+        runner_new = ("COPY --from=builder /wheels /wheels\n"
+                      "COPY . .\n"
+                      "RUN pip install --no-cache-dir --no-index --find-links=/wheels . \\\n"
+                      " && rm -rf /wheels")
+        replaced = False
+        for old, new in builder_variants:
+            if old in content:
+                content = content.replace(old, new)
+                replaced = True
+                break
+        if replaced and runner_old in content:
+            content = content.replace(runner_old, runner_new)
+            if log:
+                log("[detect] 未找到 requirements.txt，已切换为 pyproject/setup.py 整包构建模式")
+        elif log:
+            log("[warn] 未找到 requirements.txt，请确认项目依赖声明方式（支持 requirements.txt / pyproject.toml / setup.py）")
+
     start_file, is_dist = detect_start_file(root, ptype)
     if start_file:
         if ptype == ProjectType.NODE:
@@ -584,7 +755,7 @@ def prepare_dockerfile(root: Path, ptype: str, port: int, log: Optional[Callable
             content = content.replace('"main.ts"', f'"{start_file}"')
 
     (root / "Dockerfile").write_text(content, encoding="utf-8", newline="\n")
-    (root / ".dockerignore").write_text(DOCKERIGNORE, encoding="utf-8", newline="\n")
+    _write_dockerignore(root, log)
 
 
 # ---------- Git clone ----------
@@ -594,11 +765,15 @@ def is_git_url(s: str) -> bool:
     return s.startswith("http://") or s.startswith("https://") or s.startswith("git@") or s.endswith(".git")
 
 
-def git_clone(url: str, dest: Path, log: Callable[[str], None]) -> Path:
-    """clone 仓库到 dest，返回项目根目录（可能是 dest 本身或其子目录）"""
-    log(f"[git] 正在克隆 {url} ...")
+def git_clone(url: str, dest: Path, log: Callable[[str], None], branch: str = "") -> Path:
+    """clone 仓库到 dest，返回项目根目录（可能是 dest 本身或其子目录）。branch 可指定分支/标签。"""
+    cmd = ["git", "clone", "--depth", "1"]
+    if branch.strip():
+        cmd += ["--branch", branch.strip()]
+    cmd += [url, str(dest)]
+    log(f"[git] 正在克隆 {url} ..." + (f"（分支/标签: {branch.strip()}）" if branch.strip() else ""))
     proc = subprocess.Popen(
-        ["git", "clone", "--depth", "1", url, str(dest)],
+        cmd,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
     )
@@ -618,6 +793,12 @@ def git_clone(url: str, dest: Path, log: Callable[[str], None]) -> Path:
 # ---------- Docker 构建 ----------
 
 STEP_RE = re.compile(r"Step\s+(\d+)/(\d+)\s*:")
+# BuildKit 输出格式：`#5 [2/7] COPY package*.json ./`
+BK_STEP_RE = re.compile(r"#\d+\s+\[(\d+)/(\d+)\]")
+
+
+class BuildCancelled(Exception):
+    """用户取消构建时抛出"""
 
 
 def generate_compose(
@@ -630,37 +811,42 @@ def generate_compose(
 ) -> str:
     """生成 docker-compose.yml 文本（app 服务 + 可选 MySQL/Redis）"""
     full_tag = f"{image_name}:{tag}"
+
+    # 先汇总 app 服务的环境变量与依赖，避免生成重复的 YAML 键（后者会覆盖前者导致配置丢失）
+    app_env = ["      - TZ=Asia/Shanghai"]
+    app_depends: list[str] = []
+    if include_mysql:
+        app_depends.append("mysql")
+        app_env += [
+            "      - DB_HOST=mysql",
+            "      - DB_PORT=3306",
+            "      - DB_NAME=app",
+            "      - DB_USER=root",
+            f"      - DB_PASSWORD={db_password}",
+        ]
+    if include_redis:
+        app_depends.append("redis")
+        app_env += [
+            "      - REDIS_HOST=redis",
+            "      - REDIS_PORT=6379",
+        ]
+
     lines = [
         'version: "3.8"',
         "",
         "services:",
-        f"  app:",
+        "  app:",
         f"    image: {full_tag}",
         f"    container_name: {image_name.replace('/', '-')}",
         "    restart: unless-stopped",
-        f'    ports:',
+        "    ports:",
         f'      - "{port}:{port}"',
         "    environment:",
-        "      - TZ=Asia/Shanghai",
+        *app_env,
     ]
-    if include_mysql:
-        lines += [
-            "    depends_on:",
-            "      - mysql",
-            "    environment:",
-            "      - DB_HOST=mysql",
-            "      - DB_PORT=3306",
-            "      - DB_NAME=app",
-            f"      - DB_PASSWORD={db_password}",
-        ]
-    if include_redis:
-        lines += [
-            "    depends_on:",
-            "      - redis",
-            "    environment:",
-            "      - REDIS_HOST=redis",
-            "      - REDIS_PORT=6379",
-        ]
+    if app_depends:
+        lines.append("    depends_on:")
+        lines += [f"      - {d}" for d in app_depends]
     lines += ["    # volumes:", "    #   - app-data:/data"]
     if include_mysql:
         lines += [
@@ -708,71 +894,149 @@ def build_and_export(
     progress: Callable[[float, str], None],
     push_registry: str = "",      # 例如 registry.cn-hangzhou.aliyuncs.com/your-ns
     push: bool = False,
-) -> None:
+    build_args: Optional[dict[str, str]] = None,        # 额外构建参数
+    subdir: str = "",                                   # monorepo 子目录（相对源码根目录）
+    compress: bool = False,                             # 导出后压缩为 .tar.gz
+    should_cancel: Optional[Callable[[], bool]] = None,  # 返回 True 表示用户请求取消
+) -> Path:
     """
-    构建镜像并导出为 tar 文件。
-    - 单架构：docker build → docker save → (可选) docker push
-    - 多架构：docker buildx build --output type=oci,dest=...
+    构建镜像并导出为 tar 文件，返回最终产物路径。
+    - 在用户源码的临时副本中构建，不修改项目目录
+    - 单架构：docker build → docker save → (可选) 压缩 → (可选) docker push
+    - 多架构：docker buildx build --output type=oci,dest=...（OCI 格式，不可 docker load）
     """
-    if shutil.which("docker") is None:
-        raise RuntimeError("未检测到 docker 命令，请先安装并启动 Docker Desktop")
+    try:
+        docker_preflight()
 
-    ptype = detect_project_type(source_dir)
-    log(f"[detect] 项目类型: {ptype}")
-    prepare_dockerfile(source_dir, ptype, port, log=log)
-    log(f"[detect] Dockerfile / .dockerignore 就绪")
+        # monorepo：只构建指定子目录
+        if subdir.strip():
+            sub = source_dir / subdir.strip().strip("/\\")
+            if not sub.is_dir():
+                raise RuntimeError(f"子目录不存在: {subdir}（相对源码根目录）")
+            source_dir = sub
 
-    multi_arch = len(platforms) > 1
-    if push_registry:
-        push_registry = push_registry.rstrip("/")
-    full_tag = f"{image_name}:{tag}"
-    push_tag = f"{push_registry}/{full_tag}" if push_registry else full_tag
+        # 在源码的临时副本中构建：绝不往用户项目里写 Dockerfile / .dockerignore，构建完自动清理
+        build_dir = _make_build_copy(source_dir)
+        log(f"[info] 构建上下文已准备在临时目录（源码目录不会被修改）: {build_dir}")
+        try:
+            ptype = detect_project_type(build_dir)
+            log(f"[detect] 项目类型: {ptype}")
+            prepare_dockerfile(build_dir, ptype, port, log=log)
+            log(f"[detect] Dockerfile / .dockerignore 就绪")
 
-    if multi_arch:
-        platform_str = ",".join(platforms)
-        log(f"[buildx] 多架构构建: {platform_str}")
-        cmd = [
-            "docker", "buildx", "build",
-            "--platform", platform_str,
-            "-t", full_tag,
-            "--output", f"type=oci,dest={output_tar}",
-            str(source_dir),
-        ]
-        _run_streaming(cmd, source_dir, log, progress, multi_arch=True)
-    else:
-        platform = platforms[0]
-        log(f"[build] 单架构构建: {platform}")
-        cmd = ["docker", "build", "--platform", platform, "-t", full_tag, str(source_dir)]
-        _run_streaming(cmd, source_dir, log, progress, multi_arch=False)
-        log(f"[save] 导出镜像到 {output_tar}")
-        rc = subprocess.run(
-            ["docker", "save", "-o", str(output_tar), full_tag],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-        )
-        if rc.returncode != 0:
-            raise RuntimeError(f"docker save 失败: {rc.stdout}")
-        # 单架构镜像已进入本地仓库，可以做运行自检
-        _self_check(full_tag, port, log)
+            multi_arch = len(platforms) > 1
+            if push_registry:
+                push_registry = push_registry.rstrip("/")
+            full_tag = f"{image_name}:{tag}"
+            push_tag = f"{push_registry}/{full_tag}" if push_registry else full_tag
 
-    # 可选推送（仅单架构；多架构产物未进本地仓库，无法 push）
-    if push:
-        if multi_arch:
-            log("[push] 多架构 OCI 产物未进入本地仓库，跳过推送（如需多架构推送请用 buildx --push）")
-        else:
-            if not push_registry:
-                raise RuntimeError("请填写镜像仓库地址（如 registry.cn-hangzhou.aliyuncs.com/your-ns）后再推送")
-            log(f"[push] 推送镜像: {push_tag}")
-            rc = subprocess.run(
-                ["docker", "push", push_tag],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-            )
-            if rc.returncode != 0:
-                raise RuntimeError(f"docker push 失败（请先 docker login）: {rc.stdout}")
-            log(f"[push] ✓ 推送完成: {push_tag}")
+            build_arg_flags: list[str] = []
+            for k, v in (build_args or {}).items():
+                build_arg_flags += ["--build-arg", f"{k}={v}"]
 
-    log(f"[done] 镜像已导出: {output_tar} ({output_tar.stat().st_size/1024/1024:.1f} MB)")
+            if multi_arch:
+                platform_str = ",".join(platforms)
+                log(f"[buildx] 多架构构建: {platform_str}")
+                cmd = [
+                    "docker", "buildx", "build",
+                    "--platform", platform_str,
+                    "-t", full_tag,
+                    "--output", f"type=oci,dest={output_tar}",
+                    *build_arg_flags,
+                    str(build_dir),
+                ]
+                _run_streaming(cmd, build_dir, log, progress, multi_arch=True, should_cancel=should_cancel)
+                # OCI 产物不是 docker save 格式，docker load 无法导入，必须明确告知用户
+                log(f"[save] 多架构 OCI 产物已导出: {output_tar}")
+                log("[hint] ⚠ 注意：OCI 格式归档不能直接用 docker load 导入（docker load 只认单架构 docker save 格式）。")
+                log("[hint]   推荐用法：推送到镜像仓库，目标机器 docker pull 拉取；")
+                log("[hint]   或者在目标架构的机器上分别用本工具做单架构构建（产物可直接 docker load）。")
+            else:
+                platform = platforms[0]
+                log(f"[build] 单架构构建: {platform}")
+                cmd = ["docker", "build", "--platform", platform, "-t", full_tag,
+                       *build_arg_flags, str(build_dir)]
+                _run_streaming(cmd, build_dir, log, progress, multi_arch=False, should_cancel=should_cancel)
+                if should_cancel and should_cancel():
+                    raise BuildCancelled()
+                log(f"[save] 导出镜像到 {output_tar}")
+                rc = subprocess.run(
+                    ["docker", "save", "-o", str(output_tar), full_tag],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                if rc.returncode != 0:
+                    raise RuntimeError(f"docker save 失败: {rc.stdout}")
+                # 可选：压缩为 .tar.gz，方便传输与保存
+                if compress:
+                    if should_cancel and should_cancel():
+                        raise BuildCancelled()
+                    gz_path = output_tar.with_name(output_tar.name + ".gz")
+                    log(f"[save] 压缩为 {gz_path.name} ...")
+                    with open(output_tar, "rb") as f_in, gzip.open(gz_path, "wb", compresslevel=6) as f_out:
+                        shutil.copyfileobj(f_in, f_out, 1024 * 1024)
+                    output_tar.unlink()
+                    output_tar = gz_path
+                # 单架构镜像已进入本地仓库，可以做运行自检
+                _self_check(full_tag, port, log)
+
+            # 可选推送（仅单架构；多架构产物未进本地仓库，无法 push）
+            if push:
+                if multi_arch:
+                    log("[push] 多架构 OCI 产物未进入本地仓库，跳过推送（如需多架构推送请用 buildx --push）")
+                else:
+                    if not push_registry:
+                        raise RuntimeError("请填写镜像仓库地址（如 registry.cn-hangzhou.aliyuncs.com/your-ns）后再推送")
+                    if should_cancel and should_cancel():
+                        raise BuildCancelled()
+                    log(f"[push] 推送镜像: {push_tag}")
+                    rc = subprocess.run(
+                        ["docker", "push", push_tag],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace",
+                    )
+                    if rc.returncode != 0:
+                        raise RuntimeError(f"docker push 失败（请先 docker login）: {rc.stdout}")
+                    log(f"[push] ✓ 推送完成: {push_tag}")
+
+            log(f"[done] 镜像已导出: {output_tar} ({output_tar.stat().st_size/1024/1024:.1f} MB)")
+            return output_tar
+        finally:
+            shutil.rmtree(build_dir, ignore_errors=True)
+    except BuildCancelled:
+        raise
+    except RuntimeError as e:
+        # 常见英文报错翻译成中文提示，降低小白排障成本
+        raise RuntimeError(friendly_error(str(e))) from e
+
+
+def _make_build_copy(source_dir: Path) -> Path:
+    """把源码复制到临时目录作为构建上下文，绝不修改用户项目目录。
+
+    复制时排除体积大且构建时不需要的目录（.git / node_modules / 各语言构建产物等），
+    这些目录本来也会被 .dockerignore 排除在镜像之外，不影响构建结果。
+    """
+    ignored = {".git", ".svn", ".hg", "node_modules", "__pycache__", ".venv", "venv",
+               "env", "dist", "build", "target", "vendor", ".gradle", ".idea",
+               ".vscode", "bin", "obj", ".next", "out", ".dart_tool"}
+    dest = Path(tempfile.mkdtemp(prefix="docker_pack_build_"))
+    shutil.copytree(source_dir, dest, dirs_exist_ok=True,
+                    ignore=lambda d, names: [n for n in names if n in ignored])
+    return dest
+
+
+def cleanup_old_outputs(out_dir: Path, keep: int = 20) -> None:
+    """产物目录自动清理：只保留最近 keep 个 tar/tar.gz，删除更早的，避免无限占盘。"""
+    try:
+        out_dir = Path(out_dir)
+        if not out_dir.is_dir():
+            return
+        files = [p for p in out_dir.glob("*.tar*") if p.is_file()]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for p in files[keep:]:
+            p.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _self_check(image_tag: str, port: int, log: Callable[[str], None]) -> None:
@@ -849,6 +1113,7 @@ def _run_streaming(
     log: Callable[[str], None],
     progress: Callable[[float, str], None],
     multi_arch: bool,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> None:
     log("$ " + " ".join(cmd))
     proc = subprocess.Popen(
@@ -858,19 +1123,45 @@ def _run_streaming(
         bufsize=1,
     )
     assert proc.stdout is not None
+
+    # 用独立线程读子进程输出，主循环才有机会响应取消请求
+    out_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def _reader():
+        for line in proc.stdout:
+            out_queue.put(line)
+        out_queue.put(None)
+
+    threading.Thread(target=_reader, daemon=True).start()
+
     current, total = 0, 1
-    for line in proc.stdout:
+    cancelled = False
+    while True:
+        try:
+            line = out_queue.get(timeout=0.2)
+        except queue.Empty:
+            if should_cancel and should_cancel():
+                cancelled = True
+                break
+            continue
+        if line is None:  # 子进程输出结束
+            break
         line = line.rstrip()
         if not line:
             continue
         log(line)
-        m = STEP_RE.search(line)
+        # 同时兼容旧版 `Step n/m:` 与 BuildKit `#N [n/m]` 两种输出格式
+        m = STEP_RE.search(line) or BK_STEP_RE.search(line)
         if m:
             current, total = int(m.group(1)), int(m.group(2))
             pct = current / total if total else 0
             progress(pct, f"Step {current}/{total}")
+    if cancelled:
+        proc.kill()
+        proc.wait()
+        raise BuildCancelled()
     proc.wait()
     if proc.returncode != 0:
-        raise RuntimeError(f"命令执行失败，退出码 {proc.returncode}")
+        raise RuntimeError(f"命令执行失败，退出码 {proc.returncode}（详见上方日志）")
     if not multi_arch:
         progress(1.0, "完成")

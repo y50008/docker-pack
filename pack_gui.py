@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pack_gui.py — Docker 打包工具可视化界面（v1.3）
-新增：23 种框架类型、一键 Compose、镜像推送、历史记录、构建加速
+pack_gui.py — Docker 打包工具可视化界面（v1.4）
+新增：取消构建、登录镜像仓库、Git 分支/标签、monorepo 子目录、构建参数、
+      tar.gz 压缩、产物目录可配置与自动清理、输入校验、错误中文化
 """
 
 import json
 import os
 import queue
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # 兼容 PyInstaller 打包后的导入
-sys_path_ok = False
 try:
     import core
-    sys_path_ok = True
 except ImportError:
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
@@ -29,13 +30,16 @@ except ImportError:
 HISTORY_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "DockerPack"
 HISTORY_FILE = HISTORY_DIR / "history.json"
 
+# 默认产物目录
+DEFAULT_OUT_DIR = Path(tempfile.gettempdir()) / "docker_pack_out"
+
 
 class PackApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("Docker 项目打包工具 v1.3")
-        root.geometry("880x780")
-        root.minsize(800, 680)
+        root.title("Docker 项目打包工具 v1.4")
+        root.geometry("900x860")
+        root.minsize(820, 740)
 
         self.msg_queue: queue.Queue = queue.Queue()
         self.temp_dirs: list[Path] = []
@@ -43,6 +47,7 @@ class PackApp:
         self.final_compose: Path | None = None
         self.start_time: float = 0.0
         self.building = False
+        self.cancel_requested = False
         self.history: list[dict] = []
 
         self._build_ui()
@@ -87,6 +92,21 @@ class PackApp:
         self.git_entry.grid(row=2, column=0, columnspan=3, sticky="ew", padx=8, pady=3)
         self.git_entry.grid_remove()
 
+        # 分支/标签（仅 Git 模式）
+        self.branch_label = ttk.Label(frm_src, text="分支/标签(可选):")
+        self.branch_label.grid(row=3, column=0, sticky="e", padx=8, pady=3)
+        self.branch_var = tk.StringVar()
+        self.branch_entry = ttk.Entry(frm_src, textvariable=self.branch_var)
+        self.branch_entry.grid(row=3, column=1, columnspan=2, sticky="ew", padx=8, pady=3)
+        self.branch_label.grid_remove()
+        self.branch_entry.grid_remove()
+
+        # monorepo 子目录（两种模式都适用）
+        ttk.Label(frm_src, text="子目录(可选):").grid(row=4, column=0, sticky="e", padx=8, pady=3)
+        self.subdir_var = tk.StringVar()
+        ttk.Entry(frm_src, textvariable=self.subdir_var
+                  ).grid(row=4, column=1, columnspan=2, sticky="ew", padx=8, pady=3)
+
         frm_src.columnconfigure(0, weight=1)
         frm_src.columnconfigure(1, weight=1)
         frm_src.columnconfigure(2, weight=0)
@@ -130,7 +150,7 @@ class PackApp:
                         variable=self.arch_all,
                         command=self._on_arch_all).grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=2)
 
-        # 4. 部署选项（Compose + 推送）
+        # 4. 部署选项（Compose + 推送 + 构建参数 + 压缩 + 产物目录）
         frm_opt = ttk.LabelFrame(self.root, text="④ 部署选项（可选）")
         frm_opt.pack(fill="x", **pad)
 
@@ -154,6 +174,27 @@ class PackApp:
         self.registry_var = tk.StringVar(value="registry.cn-hangzhou.aliyuncs.com/your-namespace")
         ttk.Entry(frm_opt, textvariable=self.registry_var, width=42).grid(row=1, column=2, columnspan=3,
                                                                            sticky="ew", padx=4, pady=(6, 2))
+
+        # 构建参数（每行一个 KEY=VALUE）
+        ttk.Label(frm_opt, text="构建参数:").grid(row=2, column=0, sticky="ne", padx=10, pady=(6, 2))
+        self.args_text = tk.Text(frm_opt, height=3, width=60, font=("Consolas", 9),
+                                 background="#0d1220", foreground="#d4d4d4",
+                                 insertbackground="#d4d4d4", relief="solid", borderwidth=1)
+        self.args_text.grid(row=2, column=1, columnspan=4, sticky="ew", padx=4, pady=(6, 2))
+        ttk.Label(frm_opt, text="每行一个 KEY=VALUE，会传给 docker build --build-arg（可留空）",
+                  foreground="gray").grid(row=3, column=1, columnspan=4, sticky="w", padx=4)
+
+        # 压缩 + 产物目录
+        self.compress_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frm_opt, text="压缩为 .tar.gz（体积更小）", variable=self.compress_var
+                        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 2))
+        ttk.Label(frm_opt, text="产物目录:").grid(row=5, column=0, sticky="e", padx=10, pady=3)
+        self.outdir_var = tk.StringVar(value=str(DEFAULT_OUT_DIR))
+        ttk.Entry(frm_opt, textvariable=self.outdir_var, width=48
+                  ).grid(row=5, column=1, columnspan=3, sticky="ew", padx=4, pady=3)
+        ttk.Button(frm_opt, text="选择目录...", command=self._browse_outdir
+                   ).grid(row=5, column=4, padx=4, pady=3)
+
         frm_opt.columnconfigure(2, weight=1)
 
         # 5. Notebook：构建 / 历史
@@ -168,15 +209,21 @@ class PackApp:
         frm_btn.pack(fill="x", padx=8, pady=6)
 
         self.build_btn = ttk.Button(frm_btn, text="开始打包", command=self._start_build)
-        self.build_btn.pack(side="left", padx=8)
+        self.build_btn.pack(side="left", padx=6)
+
+        self.cancel_btn = ttk.Button(frm_btn, text="取消构建", command=self._cancel_build, state="disabled")
+        self.cancel_btn.pack(side="left", padx=6)
+
+        self.login_btn = ttk.Button(frm_btn, text="登录镜像仓库", command=self._docker_login)
+        self.login_btn.pack(side="left", padx=6)
 
         self.download_btn = ttk.Button(frm_btn, text="下载打包好的镜像文件",
                                        command=self._download_tar, state="disabled")
-        self.download_btn.pack(side="left", padx=8)
+        self.download_btn.pack(side="left", padx=6)
 
         self.compose_btn = ttk.Button(frm_btn, text="下载 docker-compose.yml",
                                       command=self._download_compose, state="disabled")
-        self.compose_btn.pack(side="left", padx=8)
+        self.compose_btn.pack(side="left", padx=6)
 
         self.status_label = ttk.Label(frm_btn, text="就绪", foreground="gray")
         self.status_label.pack(side="right", padx=12)
@@ -228,12 +275,16 @@ class PackApp:
     def _on_mode_change(self):
         if self.src_mode.get() == "local":
             self.git_entry.grid_remove()
+            self.branch_label.grid_remove()
+            self.branch_entry.grid_remove()
             self.local_entry.grid()
             self.browse_btn.grid()
         else:
             self.local_entry.grid_remove()
             self.browse_btn.grid_remove()
             self.git_entry.grid()
+            self.branch_label.grid()
+            self.branch_entry.grid()
 
     def _browse_local(self):
         d = filedialog.askdirectory(title="选择项目源码目录")
@@ -241,6 +292,11 @@ class PackApp:
             self.local_entry.delete(0, tk.END)
             self.local_entry.insert(0, d)
             self.name_var.set(Path(d).name.lower().replace("_", "-"))
+
+    def _browse_outdir(self):
+        d = filedialog.askdirectory(title="选择镜像产物保存目录")
+        if d:
+            self.outdir_var.set(d)
 
     def _on_arch_change(self):
         if not any(v.get() for v, _, _ in self.arch_options):
@@ -255,6 +311,40 @@ class PackApp:
     def _collect_platforms(self) -> list[str]:
         selected = [pid for var, pid, _ in self.arch_options if var.get()]
         return selected or ["linux/amd64"]
+
+    # ---------- 登录镜像仓库 ----------
+
+    def _docker_login(self):
+        """弹窗收集仓库地址/用户名/密码，调用 docker login --password-stdin，无需切命令行。"""
+        registry = simpledialog.askstring(
+            "登录镜像仓库", "仓库地址（留空 = Docker Hub）：",
+            initialvalue="", parent=self.root)
+        if registry is None:
+            return
+        username = simpledialog.askstring("登录镜像仓库", "用户名：", parent=self.root)
+        if not username:
+            return
+        password = simpledialog.askstring("登录镜像仓库", "密码 / 访问令牌：", show="*", parent=self.root)
+        if not password:
+            return
+        host = registry.strip() or "https://index.docker.io/v1/"
+        # docker login 只接受 host[:port]，把命名空间路径去掉
+        if "://" not in host and "/" in host:
+            host = host.split("/")[0]
+        cmd = ["docker", "login", host, "-u", username.strip(), "--password-stdin"]
+        self._append_log(f"[login] 正在登录 {host} ...")
+        try:
+            rc = subprocess.run(cmd, input=password, capture_output=True,
+                                text=True, encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            messagebox.showerror("登录失败", "未检测到 docker 命令，请先安装并启动 Docker Desktop")
+            return
+        if rc.returncode == 0:
+            self._append_log(f"[login] ✓ 已登录 {host}")
+            messagebox.showinfo("登录成功", f"已登录 {host}\n现在可以勾选「构建后推送镜像」了。")
+        else:
+            self._append_log(f"[login] 登录失败：{rc.stderr or rc.stdout}")
+            messagebox.showerror("登录失败", (rc.stderr or rc.stdout or "未知错误"))
 
     # ---------- 历史记录 ----------
 
@@ -323,6 +413,11 @@ class PackApp:
             self.src_mode.set("local")
             self.local_entry.delete(0, tk.END)
             self.local_entry.insert(0, rec.get("source", ""))
+        self.branch_var.set(rec.get("branch", ""))
+        self.subdir_var.set(rec.get("subdir", ""))
+        self.compress_var.set(bool(rec.get("compress", False)))
+        self.args_text.delete("1.0", tk.END)
+        self.args_text.insert("1.0", rec.get("build_args", ""))
         self._on_mode_change()
         # 架构
         want = rec.get("platforms", ["linux/amd64"])
@@ -337,6 +432,7 @@ class PackApp:
         if self.building:
             return
 
+        src = ""
         if self.src_mode.get() == "local":
             src = self.local_entry.get().strip()
             if not src or not Path(src).is_dir():
@@ -352,10 +448,19 @@ class PackApp:
 
         name = self.name_var.get().strip() or "my-app"
         tag = self.tag_var.get().strip() or "latest"
-        try:
-            port = int(self.port_var.get())
-        except ValueError:
-            messagebox.showerror("错误", "端口必须是数字")
+        port_raw = self.port_var.get().strip()
+        # 输入校验（镜像名 / 标签 / 端口）
+        err = core.validate_image_name(name) or core.validate_tag(tag) or core.validate_port(port_raw)
+        if err:
+            messagebox.showerror("输入有误", err)
+            return
+        port = int(port_raw)
+
+        # 构建参数校验
+        build_args_text = self.args_text.get("1.0", tk.END)
+        build_args, ba_err = core.validate_build_args(build_args_text)
+        if ba_err:
+            messagebox.showerror("输入有误", ba_err)
             return
 
         platforms = self._collect_platforms()
@@ -366,12 +471,24 @@ class PackApp:
             return
         gen_compose = self.gen_compose.get()
         db_pass = self.db_pass_var.get().strip() or "change-me"
+        branch = self.branch_var.get().strip()
+        subdir = self.subdir_var.get().strip()
+        compress = self.compress_var.get()
 
-        out_dir = Path(tempfile.gettempdir()) / "docker_pack_out"
-        out_dir.mkdir(exist_ok=True)
+        # 产物目录
+        out_dir = Path(self.outdir_var.get().strip() or str(DEFAULT_OUT_DIR)).expanduser()
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror("错误", f"产物目录无法创建：{e}")
+            return
+        # core 压缩时会在 .tar 后追加 .gz，这里先按 .tar 命名
         out_tar = out_dir / f"{name.replace('/', '_')}_{tag}_{'multi' if len(platforms)>1 else platforms[0].replace('/','_')}.tar"
         if out_tar.exists():
             out_tar.unlink()
+        gz_tar = out_tar.with_name(out_tar.name + ".gz")
+        if gz_tar.exists():
+            gz_tar.unlink()
 
         # 记录历史
         self._add_history({
@@ -379,6 +496,8 @@ class PackApp:
             "source": src if self.src_mode.get() == "local" else self.git_entry.get().strip(),
             "name": name, "tag": tag, "port": port,
             "platforms": platforms, "status": "进行中",
+            "branch": branch, "subdir": subdir,
+            "compress": compress, "build_args": build_args_text.strip(),
         })
 
         # 重置 UI
@@ -390,11 +509,14 @@ class PackApp:
         self.download_btn.configure(state="disabled")
         self.compose_btn.configure(state="disabled")
         self.build_btn.configure(state="disabled", text="打包中...")
+        self.cancel_btn.configure(state="normal")
+        self.login_btn.configure(state="disabled")
         self.status_label.configure(text="构建中...", foreground="orange")
         self.final_tar = None
         self.final_compose = None
         self.start_time = time.time()
         self.building = True
+        self.cancel_requested = False
 
         opts = {
             "name": name, "tag": tag, "port": port, "platforms": platforms,
@@ -403,6 +525,9 @@ class PackApp:
             "compose_mysql": self.compose_mysql.get(),
             "compose_redis": self.compose_redis.get(),
             "db_pass": db_pass,
+            "branch": branch, "subdir": subdir,
+            "compress": compress, "build_args": build_args,
+            "out_dir": str(out_dir),
         }
         t = threading.Thread(
             target=self._build_worker,
@@ -411,6 +536,14 @@ class PackApp:
             daemon=True,
         )
         t.start()
+
+    def _cancel_build(self):
+        if not self.building:
+            return
+        self.cancel_requested = True
+        self.cancel_btn.configure(state="disabled")
+        self.status_label.configure(text="正在取消...", foreground="orange")
+        self._append_log("[cancel] 已请求取消，正在终止构建进程...")
 
     def _build_worker(self, source_dir, git_url, out_tar, opts):
         try:
@@ -422,12 +555,16 @@ class PackApp:
             if git_url:
                 tmp = Path(tempfile.mkdtemp(prefix="docker_pack_src_"))
                 self.temp_dirs.append(tmp)
-                source_dir = core.git_clone(git_url, tmp, self._log)
+                try:
+                    source_dir = core.git_clone(git_url, tmp, self._log, branch=opts.get("branch", ""))
+                except Exception as e:
+                    # git clone 的错误未经 core 翻译，这里补一层中文提示
+                    raise RuntimeError(core.friendly_error(str(e)))
                 self._log(f"[git] 源码目录: {source_dir}")
 
             assert source_dir is not None
 
-            core.build_and_export(
+            final_tar = core.build_and_export(
                 source_dir=source_dir,
                 image_name=opts["name"],
                 tag=opts["tag"],
@@ -438,9 +575,13 @@ class PackApp:
                 progress=self._progress,
                 push_registry=opts["registry"],
                 push=opts["push"],
+                build_args=opts["build_args"],
+                subdir=opts["subdir"],
+                compress=opts["compress"],
+                should_cancel=lambda: self.cancel_requested,
             )
 
-            self.final_tar = out_tar
+            self.final_tar = final_tar
 
             # 生成 compose
             compose_path = None
@@ -451,18 +592,34 @@ class PackApp:
                     include_redis=opts["compose_redis"],
                     db_password=opts["db_pass"],
                 )
-                compose_path = out_tar.with_suffix(".compose.yml")
+                base = final_tar.name
+                if base.endswith(".tar.gz"):
+                    base = base[:-len(".tar.gz")]
+                else:
+                    base = final_tar.stem
+                compose_path = final_tar.with_name(base + ".compose.yml")
                 compose_path.write_text(compose_text, encoding="utf-8", newline="\n")
                 self.final_compose = compose_path
                 self._log(f"[compose] 已生成 {compose_path}")
                 self._log("[compose] 内容预览：\n" + compose_text)
 
-            self._log(f"=== 全部完成，产物: {out_tar} ===")
-            self.msg_queue.put(("done", {"tar": str(out_tar),
+            # 产物目录自动清理：只保留最近 20 个镜像归档
+            core.cleanup_old_outputs(Path(opts["out_dir"]), keep=20)
+
+            self._log(f"=== 全部完成，产物: {final_tar} ===")
+            self.msg_queue.put(("done", {"tar": str(final_tar),
                                          "compose": str(compose_path) if compose_path else None}))
+        except core.BuildCancelled:
+            self._log("[cancel] 构建已取消")
+            self.msg_queue.put(("cancelled", None))
         except Exception as e:
             self._log(f"[ERROR] {e}")
             self.msg_queue.put(("error", str(e)))
+        finally:
+            # 清理本次任务克隆的临时源码目录
+            for d in self.temp_dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            self.temp_dirs.clear()
 
     # ---------- 线程安全回调 ----------
 
@@ -486,7 +643,10 @@ class PackApp:
                     self.status_label.configure(text=status, foreground="orange")
                 elif kind == "done":
                     self.building = False
+                    self.cancel_requested = False
                     self.build_btn.configure(state="normal", text="开始打包")
+                    self.cancel_btn.configure(state="disabled")
+                    self.login_btn.configure(state="normal")
                     self.download_btn.configure(state="normal")
                     if payload and payload.get("compose"):
                         self.compose_btn.configure(state="normal")
@@ -498,9 +658,23 @@ class PackApp:
                         self._save_history()
                         self._refresh_history()
                     messagebox.showinfo("完成", "镜像打包完成！点击「下载打包好的镜像文件」保存。")
+                elif kind == "cancelled":
+                    self.building = False
+                    self.cancel_requested = False
+                    self.build_btn.configure(state="normal", text="开始打包")
+                    self.cancel_btn.configure(state="disabled")
+                    self.login_btn.configure(state="normal")
+                    self.status_label.configure(text="已取消", foreground="gray")
+                    if self.history:
+                        self.history[0]["status"] = "已取消"
+                        self._save_history()
+                        self._refresh_history()
                 elif kind == "error":
                     self.building = False
+                    self.cancel_requested = False
                     self.build_btn.configure(state="normal", text="开始打包")
+                    self.cancel_btn.configure(state="disabled")
+                    self.login_btn.configure(state="normal")
                     self.status_label.configure(text="✗ 构建失败", foreground="red")
                     if self.history:
                         self.history[0]["status"] = "失败"
@@ -541,14 +715,12 @@ class PackApp:
             messagebox.showwarning("提示", "还没有可下载的文件")
             return
         dest = filedialog.asksaveasfilename(
-            defaultextension=".tar",
             initialfile=self.final_tar.name,
-            filetypes=[("Docker 镜像归档", "*.tar"), ("所有文件", "*.*")],
+            filetypes=[("Docker 镜像归档", "*.tar *.tar.gz"), ("所有文件", "*.*")],
             title="保存镜像文件到...",
         )
         if not dest:
             return
-        import shutil
         shutil.copy2(self.final_tar, dest)
         self._append_log(f"[save] 已保存到: {dest}")
         messagebox.showinfo("完成", f"镜像文件已保存到:\n{dest}\n\n在目标机器上用 docker load -i {Path(dest).name} 即可导入。")
@@ -565,7 +737,6 @@ class PackApp:
         )
         if not dest:
             return
-        import shutil
         shutil.copy2(self.final_compose, dest)
         self._append_log(f"[save] compose 已保存到: {dest}")
 

@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+.pytest_cache/
 
 # PyInstaller
 build/
@@ -22,4 +23,5 @@ Thumbs.db
 
 # 临时产物
 *.tar
+*.tar.gz
 *.log
